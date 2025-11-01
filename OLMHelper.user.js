@@ -7,6 +7,8 @@
 // @match        https://olm.vn/chu-de/*
 // @grant        unsafeWindow
 // @run-at       document-start
+// @updateURL    https://github.com/vandoaq/script/raw/refs/heads/main/OLMHelper.user.js
+// @downloadURL  https://github.com/vandoaq/script/raw/refs/heads/main/OLMHelper.user.js
 // @icon         https://play-lh.googleusercontent.com/PMA5MRr5DUJBUbDgdUn6arbGXteDjRBIZVO3P3z9154Kud2slXPjy-iiPwwKfvZhc4o=w240-h480-rw
 // ==/UserScript==
 
