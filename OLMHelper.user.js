@@ -1,10 +1,11 @@
 // ==UserScript==
-// @name         OLM Helper
+// @name         OLM Helper (Desktop + Mobile)
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  Hack Đáp Án OLM by Đòn Hư Lém
+// @version      1.5
+// @description  Đòn Hư Lém - panel đáp án/solution hiển thị tốt trên PC & điện thoại
 // @author       Đòn Hư Lém
 // @match        https://olm.vn/chu-de/*
+// @match        https://olm.vn/*
 // @grant        unsafeWindow
 // @run-at       document-start
 // @updateURL    https://github.com/vandoaq/script/raw/refs/heads/main/OLMHelper.user.js
@@ -15,49 +16,31 @@
 (function () {
   "use strict";
 
+  // ==== Robust window bridge for mobile ====
+  const UW = (typeof unsafeWindow !== "undefined" && unsafeWindow) ? unsafeWindow : window;
+
   const TARGET_URL_KEYWORD = "get-question-of-ids";
   const LS_SIZE = "olm_size";
   const LS_POS = "olm_pos";
   const LS_DARK = "olm_dark";
-  const LS_PIN = "olm_pin"; // 'right' | 'left' | 'free'
+  const LS_PIN  = "olm_pin"; // 'right' | 'left' | 'free'
   const HIGHLIGHT_CLASS = "olm-hl";
 
-  // ---------- Math engine: MathJax v3 ----------
-  function ensureMathJax() {
-    if (unsafeWindow.MathJax) return;
-    const cfg = document.createElement("script");
-    cfg.type = "text/javascript";
-    cfg.text = `
-      window.MathJax = {
-        tex: {
-          inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
-          displayMath: [['$$','$$'], ['\\\\[','\\\\]']],
-          processEscapes: true,
-          processEnvironments: true
-        },
-        options: {
-          skipHtmlTags: ['noscript','style','textarea','pre','code'],
-          ignoreHtmlClass: 'no-mathjax',
-          renderActions: { addMenu: [] }
-        },
-        startup: { typeset: false }
-      };
-    `;
-    const s = document.createElement("script");
-    s.async = true;
-    s.src = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js";
-    document.head.appendChild(cfg);
-    document.head.appendChild(s);
-  }
-  ensureMathJax();
-
-  // ---------- Helpers ----------
+  // ===== Utilities =====
+  const ready = (fn) => {
+    if (document.readyState === "complete" || document.readyState === "interactive") fn();
+    else document.addEventListener("DOMContentLoaded", fn, { once: true });
+  };
+  const ensureHead = (node) => {
+    if (document.head) document.head.appendChild(node);
+    else ready(() => (document.head || document.documentElement).appendChild(node));
+  };
+  const ensureBody = (node) => {
+    if (document.body) document.body.appendChild(node);
+    else ready(() => document.body.appendChild(node));
+  };
   const debounce = (fn, ms) => {
-    let t;
-    return (...args) => {
-      clearTimeout(t);
-      t = setTimeout(() => fn(...args), ms);
-    };
+    let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
   };
 
   function decodeBase64Utf8(base64) {
@@ -66,60 +49,75 @@
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       return new TextDecoder("utf-8").decode(bytes);
-    } catch (e) {
-      console.error("Lỗi giải mã Base64:", e);
-      return "Lỗi giải mã nội dung!";
-    }
+    } catch (e) { console.error("Lỗi giải mã Base64:", e); return "Lỗi giải mã nội dung!"; }
   }
 
-  // vá cặp $/$$ bị lệch nhẹ
   function mildLatexFix(html) {
     return html
       .replace(/\$\$([^$]+)\$(?!\$)/g, "$$$$${1}$$")
       .replace(/\$(?!\$)([^$]+)\$\$/g, "$$${1}$$");
   }
 
-  // Highlight giữ DOM
   function highlightInElement(el, keyword) {
     el.querySelectorAll("." + HIGHLIGHT_CLASS).forEach(n => {
-      const parent = n.parentNode;
-      while (n.firstChild) parent.insertBefore(n.firstChild, n);
-      parent.removeChild(n);
-      parent.normalize?.();
+      const p = n.parentNode; while (n.firstChild) p.insertBefore(n.firstChild, n); p.removeChild(n); p.normalize?.();
     });
     if (!keyword) return;
-
     const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
     const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
     let node;
     while ((node = walk.nextNode())) {
-      const t = node.nodeValue;
-      if (!t || !t.trim()) continue;
+      const t = node.nodeValue; if (!t || !t.trim()) continue;
       let m, last = 0, pieces = [];
       while ((m = regex.exec(t))) {
         pieces.push(document.createTextNode(t.slice(last, m.index)));
-        const mark = document.createElement("mark");
-        mark.className = HIGHLIGHT_CLASS;
+        const mark = document.createElement("mark"); mark.className = HIGHLIGHT_CLASS;
         mark.textContent = t.slice(m.index, m.index + m[0].length);
-        pieces.push(mark);
-        last = m.index + m[0].length;
+        pieces.push(mark); last = m.index + m[0].length;
       }
       if (pieces.length) {
         pieces.push(document.createTextNode(t.slice(last)));
-        const frag = document.createDocumentFragment();
-        pieces.forEach(p => frag.appendChild(p));
+        const frag = document.createDocumentFragment(); pieces.forEach(p => frag.appendChild(p));
         node.parentNode.replaceChild(frag, node);
       }
     }
   }
 
-  // ---------- UI ----------
+  // ===== MathJax v3 loader (safe for mobile) =====
+  function ensureMathJax() {
+    if (UW.MathJax) return;
+    const cfg = document.createElement("script");
+    cfg.type = "text/javascript";
+    cfg.text = `
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
+          displayMath: [['$$','$$'], ['\\\\[','\\\\]']],
+          processEscapes: true, processEnvironments: true
+        },
+        options: { skipHtmlTags: ['noscript','style','textarea','pre','code'], ignoreHtmlClass: 'no-mathjax', renderActions: { addMenu: [] } },
+        startup: { typeset: false }
+      };
+    `;
+    const s = document.createElement("script");
+    s.async = true;
+    s.src = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js";
+    ensureHead(cfg);
+    ensureHead(s);
+  }
+  ensureMathJax();
+
+  // ===== UI =====
   class AnswerDisplay {
     constructor() {
       this.isVisible = true;
-      this.dragState = { isDragging: false, startX: 0, startY: 0, initialX: 0, initialY: 0 };
-      this.size = { w: 520, h: Math.round(window.innerHeight * 0.7) };
-      this.pos = null; // {left, top} khi free
+      this.dragState = { dragging: false, startX: 0, startY: 0, initX: 0, initY: 0 };
+      this.resizeState = null;
+
+      // size default thân thiện mobile
+      const defaultH = Math.max(340, Math.round(window.innerHeight * 0.66));
+      this.size = { w: Math.min(520, Math.max(340, Math.round(window.innerWidth * 0.9))), h: defaultH };
+      this.pos = null;
       this.pinSide = localStorage.getItem(LS_PIN) || "right";
       this.dark = (() => {
         const saved = localStorage.getItem(LS_DARK);
@@ -127,37 +125,19 @@
         return window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
       })();
 
-      try {
-        const saved = JSON.parse(localStorage.getItem(LS_SIZE) || "null");
-        if (saved && saved.w && saved.h) this.size = saved;
-      } catch {}
-      try {
-        const savedPos = JSON.parse(localStorage.getItem(LS_POS) || "null");
-        if (savedPos && Number.isFinite(savedPos.left) && Number.isFinite(savedPos.top)) this.pos = savedPos;
-      } catch {}
+      try { const saved = JSON.parse(localStorage.getItem(LS_SIZE) || "null"); if (saved?.w && saved?.h) this.size = saved; } catch {}
+      try { const p = JSON.parse(localStorage.getItem(LS_POS) || "null"); if (Number.isFinite(p?.left) && Number.isFinite(p?.top)) this.pos = p; } catch {}
+
+      this.filterDebounced = debounce(this.filterQuestions.bind(this), 140);
 
       // binds
-      this.onMouseDown = this.onMouseDown.bind(this);
-      this.onMouseMove = this.onMouseMove.bind(this);
-      this.onMouseUp = this.onMouseUp.bind(this);
       this.onKeyDown = this.onKeyDown.bind(this);
-      this.exportToTxt = this.exportToTxt.bind(this);
-      this.filterQuestions = this.filterQuestions.bind(this);
-      this.filterDebounced = debounce(this.filterQuestions, 140);
-      this.renumber = this.renumber.bind(this);
-      this.renderContentWithMath = this.renderContentWithMath.bind(this);
-      this.toggleDarkMode = this.toggleDarkMode.bind(this);
-      this.togglePinSide = this.togglePinSide.bind(this);
-      this.copyAllVisibleAnswers = this.copyAllVisibleAnswers.bind(this);
-      this.onResizeDown = this.onResizeDown.bind(this);
-      this.onResizeMove = this.onResizeMove.bind(this);
-      this.onResizeUp = this.onResizeUp.bind(this);
-
-      // new
-      this.toggleVisibility = this.toggleVisibility.bind(this);
-      this.showToggleBtn = this.showToggleBtn.bind(this);
-      this.hideToggleBtn = this.hideToggleBtn.bind(this);
-      this.positionToggleBtn = this.positionToggleBtn.bind(this);
+      this.onPointerDownDrag = this.onPointerDownDrag.bind(this);
+      this.onPointerMoveDrag = this.onPointerMoveDrag.bind(this);
+      this.onPointerUpDrag = this.onPointerUpDrag.bind(this);
+      this.onPointerDownResize = this.onPointerDownResize.bind(this);
+      this.onPointerMoveResize = this.onPointerMoveResize.bind(this);
+      this.onPointerUpResize = this.onPointerUpResize.bind(this);
     }
 
     init() {
@@ -170,7 +150,7 @@
     }
 
     injectCSS() {
-      const styles = `
+      const css = `
         :root{
           --panel-w: 520px;
           --panel-h: 70vh;
@@ -179,7 +159,6 @@
           --accent-2: #00c2ff;
           --muted: #6b7280;
           --success: #10b981;
-          --danger: #ef4444;
           --bg-glass: linear-gradient(135deg, rgba(255,255,255,0.62), rgba(245,248,255,0.5));
           --bg-top: linear-gradient(180deg, rgba(255,255,255,0.4), rgba(255,255,255,0.28));
           --bg-sub: rgba(255,255,255,0.4);
@@ -188,151 +167,110 @@
           --text-sub: #334155;
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial;
         }
-        #olm-answers-container {
-          position: fixed; top: 18px;
+        #olm-answers-container{
+          position: fixed;
+          top: max(12px, env(safe-area-inset-top));
           width: var(--panel-w); height: var(--panel-h);
-          z-index: 2147483647; display: flex; flex-direction: column;
+          z-index: 2147483647; display:flex; flex-direction:column;
           border-radius: 14px; overflow: hidden;
+          -webkit-backdrop-filter: blur(10px) saturate(120%);
           backdrop-filter: blur(10px) saturate(120%);
           background: var(--bg-glass);
           border: 1px solid var(--glass-border);
           box-shadow: var(--shadow);
-          transition: transform 180ms ease, opacity 180ms ease, left 120ms, right 120ms;
-          color: var(--text-main); user-select: none; min-width: 340px;
-          max-width: calc(100vw - 36px); max-height: calc(100vh - 36px);
+          transition: transform .18s ease, opacity .18s ease, left .12s, right .12s;
+          color: var(--text-main); user-select: none; min-width: 320px;
+          max-width: calc(100vw - 24px);
+          max-height: calc(100vh - 24px);
         }
-        #olm-answers-container.hidden { opacity: 0; transform: translateY(-6px) scale(0.98); pointer-events: none; }
+        #olm-answers-container.hidden{ opacity:.0; transform: translateY(-6px) scale(.98); pointer-events:none; }
 
-        /* dark */
         #olm-answers-container.olm-dark{
           --glass-border: rgba(255,255,255,0.12);
           --bg-glass: linear-gradient(135deg, rgba(24,26,33,0.65), rgba(24,28,37,0.52));
           --bg-top: linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.04));
           --bg-sub: rgba(255,255,255,0.08);
           --shadow: 0 10px 30px rgba(0,0,0,0.55);
-          --text-main: #e5e7eb;
-          --text-sub: #cbd5e1;
+          --text-main: #e5e7eb; --text-sub: #cbd5e1;
         }
 
-        .olm-topbar { display:flex; align-items:center; gap:10px; padding:12px 14px;
-          background: var(--bg-top);
-          border-bottom: 1px solid rgba(0,0,0,0.06); cursor: grab; }
+        .olm-topbar{ display:flex; align-items:center; gap:10px; padding:10px 12px; background: var(--bg-top); border-bottom: 1px solid rgba(0,0,0,0.06); touch-action: none; }
         #olm-answers-container.olm-dark .olm-topbar{ border-bottom-color: rgba(255,255,255,0.06); }
+        .olm-brand{ display:flex; align-items:center; gap:10px; }
+        .olm-logo{ width:32px; height:32px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-weight:700; background: linear-gradient(135deg,var(--accent),var(--accent-2)); color:#fff; }
+        .olm-title{ font-size:14px; font-weight:700; line-height:1; }
+        .olm-sub{ font-size:11px; color: var(--muted); }
+        .olm-controls{ margin-left:auto; display:flex; gap:6px; align-items:center; }
+        .olm-btn{ background: transparent; border: 1px solid rgba(11,17,26,0.08); padding:6px 8px; border-radius:8px; font-size:12px; }
+        #olm-answers-container.olm-dark .olm-btn{ border-color: rgba(255,255,255,0.12); color: var(--text-main); }
 
-        .olm-brand { display:flex; align-items:center; gap:10px; }
-        .olm-logo { width:36px; height:36px; border-radius:10px; display:flex;
-          align-items:center; justify-content:center; font-weight:700;
-          background: linear-gradient(135deg,var(--accent),var(--accent-2)); color:white; }
-        .olm-title { font-size:14px; font-weight:700; line-height:1; }
-        .olm-sub { font-size:11px; color:var(--muted); }
-        .olm-controls { margin-left:auto; display:flex; gap:8px; align-items:center; }
-        .olm-btn { background: transparent; border: 1px solid rgba(11,17,26,0.08); padding:6px 8px; border-radius:8px; cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-size:12px; }
-        #olm-answers-container.olm-dark .olm-btn{ border-color: rgba(255,255,255,0.12); color:var(--text-main); }
-        .olm-btn:focus{ outline: 2px solid rgba(99,102,241,0.3); }
-
-        .search-wrap { display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid rgba(0,0,0,0.06);
-          background: var(--bg-sub); }
+        .search-wrap{ display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid rgba(0,0,0,0.06); background: var(--bg-sub); }
         #olm-answers-container.olm-dark .search-wrap{ border-bottom-color: rgba(255,255,255,0.06); }
-        .search-input { flex:1; padding:8px 10px; border-radius:10px; border:1px solid rgba(0,0,0,0.06); outline:none; background: rgba(255,255,255,0.8); font-size:13px; }
+        .search-input{ flex:1; padding:8px 10px; border-radius:10px; border:1px solid rgba(0,0,0,0.06); outline:none; background: rgba(255,255,255,0.85); font-size:13px; }
         #olm-answers-container.olm-dark .search-input{ background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); color: var(--text-main); }
-        .meta { font-size:12px; color:var(--muted); min-width:80px; text-align:right; }
+        .meta{ font-size:12px; color: var(--muted); min-width:74px; text-align:right; }
 
-        #olm-answers-content { padding: 12px; overflow-y: auto; flex:1; display:flex; flex-direction:column; gap:10px; }
-        .qa-block { display:flex; flex-direction:column; gap:8px; padding:12px; border-radius:10px;
-          background: linear-gradient(180deg, rgba(255,255,255,0.85), rgba(248,250,255,0.8));
-          border: 1px solid rgba(15,23,42,0.05); box-shadow: 0 2px 8px rgba(12,18,39,0.04); }
-        #olm-answers-container.olm-dark .qa-block{
-          background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.04));
-          border-color: rgba(255,255,255,0.08);
-          box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        }
+        #olm-answers-content{ padding:10px; overflow-y:auto; -webkit-overflow-scrolling: touch; flex:1; display:flex; flex-direction:column; gap:10px; }
+        .qa-block{ display:flex; flex-direction:column; gap:8px; padding:12px; border-radius:10px; background: linear-gradient(180deg, rgba(255,255,255,0.88), rgba(248,250,255,0.8)); border:1px solid rgba(15,23,42,0.05); }
+        #olm-answers-container.olm-dark .qa-block{ background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.04)); border-color: rgba(255,255,255,0.08); }
 
-        .qa-top { display:flex; align-items:flex-start; gap:10px; }
-        .question-content { font-weight:700; color:var(--text-main); font-size:14px; flex:1; }
-        .q-index { margin-right: 6px; color:var(--text-sub); }
-        .qa-actions { display:flex; gap:6px; align-items:center; margin-left:auto; }
-
-        .pill { font-size:11px; padding:3px 7px; border-radius:999px; color:white; background:#64748b; user-select:none; }
-        .pill.ok { background: var(--success); }
-        .pill.sol { background: #3b82f6; }
-
-        .content-container { padding-left:6px; color:#0b3c49; font-size:13px; }
+        .qa-top{ display:flex; align-items:flex-start; gap:10px; }
+        .question-content{ font-weight:700; color:var(--text-main); font-size:14px; flex:1; }
+        .q-index{ margin-right:6px; color: var(--text-sub); }
+        .qa-actions{ display:flex; gap:6px; align-items:center; margin-left:auto; flex-wrap: wrap; }
+        .pill{ font-size:11px; padding:3px 7px; border-radius:999px; color:#fff; background:#64748b; }
+        .pill.ok{ background: var(--success); }
+        .pill.sol{ background: #3b82f6; }
+        .content-container{ padding-left:6px; color:#0b3c49; font-size:13px; }
         #olm-answers-container.olm-dark .content-container{ color: var(--text-main); }
-        .content-container ul { margin:6px 0; padding-left:18px; }
-        .content-container li { margin:4px 0; }
-
-        .content-container[data-type="answer"] { font-weight: 600; }
-        .content-container[data-type="answer"] li,
-        .content-container[data-type="answer"] p,
-        .content-container[data-type="answer"] span,
-        .content-container[data-type="answer"] .correct-answer { color: var(--success) !important; }
-
-        .footer-bar { padding:10px 12px; display:flex; align-items:center; gap:8px; border-top:1px solid rgba(0,0,0,0.06);
-          background: var(--bg-sub); }
+        .content-container[data-type="answer"]{ font-weight:600; }
+        .content-container[data-type="answer"] .correct-answer{ color: var(--success) !important; }
+        .footer-bar{ padding:8px 10px; display:flex; align-items:center; gap:8px; border-top:1px solid rgba(0,0,0,0.06); background: var(--bg-sub); }
         #olm-answers-container.olm-dark .footer-bar{ border-top-color: rgba(255,255,255,0.08); }
-        #export-btn { padding:8px 12px; border-radius:10px; border:1px solid rgba(11,17,26,0.08); cursor:pointer; font-weight:700;
-          background:linear-gradient(90deg,var(--accent),var(--accent-2)); color:white; box-shadow: 0 8px 24px rgba(108,99,255,0.15); }
-        #olm-answers-container.olm-dark #export-btn{ border-color: rgba(255,255,255,0.12); }
-        #count-badge { font-weight:700; color:var(--muted); margin-left:auto; font-size:13px; }
-
-        .small-ghost { background:transparent; padding:6px; border-radius:8px; border:1px solid rgba(11,17,26,0.08); }
-        .copy-btn { background: var(--success); color:white; border-radius:8px; padding:6px 8px; border:none; cursor:pointer; font-size:12px; }
-        .copy-q { background: #94a3b8; color:white; border-radius:8px; padding:6px 8px; border:none; cursor:pointer; font-size:12px; }
-        .toggle-one { background: transparent; border: 1px dashed rgba(11,17,26,0.2); color: var(--text-main); border-radius:8px; padding:5px 8px; cursor:pointer; font-size:12px; }
+        #export-btn{ padding:8px 12px; border-radius:10px; border:1px solid rgba(11,17,26,0.08); cursor:pointer; font-weight:700; background:linear-gradient(90deg,var(--accent),var(--accent-2)); color:#fff; }
+        #count-badge{ font-weight:700; color:var(--muted); margin-left:auto; font-size:13px; }
+        .copy-btn,.copy-q,.toggle-one{ border:none; border-radius:8px; padding:6px 8px; font-size:12px; }
+        .copy-btn{ background: var(--success); color:#fff; }
+        .copy-q{ background:#94a3b8; color:#fff; }
+        .toggle-one{ background: transparent; border:1px dashed rgba(11,17,26,0.2); color: var(--text-main); }
         #olm-answers-container.olm-dark .toggle-one{ border-color: rgba(255,255,255,0.2); }
-
-        .not-found { color:var(--muted); font-style:italic; }
+        .not-found{ color: var(--muted); font-style: italic; }
 
         .resize-handle{
-          position:absolute; right:6px; bottom:6px;
-          width:14px; height:14px; cursor: nwse-resize;
-          border-right:2px solid rgba(0,0,0,0.25);
-          border-bottom:2px solid rgba(0,0,0,0.25);
-          opacity:.7;
+          position:absolute; right:8px; bottom:8px; width:18px; height:18px; cursor: nwse-resize;
+          border-right:2px solid rgba(0,0,0,0.25); border-bottom:2px solid rgba(0,0,0,0.25); opacity:.7; touch-action: none;
         }
-        #olm-answers-container.olm-dark .resize-handle{
-          border-right-color: rgba(255,255,255,0.35);
-          border-bottom-color: rgba(255,255,255,0.35);
-        }
-        #olm-answers-container.resizing{ user-select:none; pointer-events:auto; }
+        #olm-answers-container.olm-dark .resize-handle{ border-right-color: rgba(255,255,255,0.35); border-bottom-color: rgba(255,255,255,0.35); }
+        #olm-answers-container.resizing{ user-select:none; }
 
-        mark.${HIGHLIGHT_CLASS}{
-          background: rgba(250, 204, 21, 0.35);
-          padding: 0 2px; border-radius: 3px;
+        mark.${HIGHLIGHT_CLASS}{ background: rgba(250, 204, 21, 0.35); padding: 0 2px; border-radius: 3px; }
+
+        @media (max-width: 520px){
+          #olm-answers-container{ left: 12px !important; right: 12px !important; width: auto !important; height: 66vh !important; }
+          .olm-controls .olm-btn{ padding:5px 6px; font-size:11px; }
+          .question-content{ font-size:13px; }
         }
 
-        @media (max-width: 520px) { #olm-answers-container { right:8px; left:8px; width: auto; height: 68vh; } }
-
-        /* ===== Floating toggle button when panel hidden ===== */
+        /* Floating toggle */
         #olm-toggle-btn{
-          position: fixed;
-          top: 18px;
-          right: 18px;
-          width: 36px; height: 36px;
-          border-radius: 999px;
-          display: none; align-items: center; justify-content: center;
-          z-index: 2147483647;
-          border: 1px solid var(--glass-border);
-          backdrop-filter: blur(10px) saturate(120%);
+          position: fixed; top: max(12px, env(safe-area-inset-top)); right: 12px;
+          width: 40px; height: 40px; border-radius: 999px; display:none; align-items:center; justify-content:center;
+          z-index: 2147483647; border: 1px solid var(--glass-border);
+          -webkit-backdrop-filter: blur(10px) saturate(120%); backdrop-filter: blur(10px) saturate(120%);
           background: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(240,245,255,0.8));
-          box-shadow: var(--shadow);
-          cursor: pointer;
-          user-select: none;
-          font-weight: 800;
-          font-size: 11px;
-          color: #111827;
+          box-shadow: var(--shadow); cursor: pointer; user-select: none; font-weight:800; font-size:12px; color:#111827;
+          touch-action: manipulation;
         }
         #olm-answers-container.olm-dark ~ #olm-toggle-btn{
           border-color: rgba(255,255,255,0.12);
-          background: linear-gradient(135deg, rgba(40,44,52,0.9), rgba(40,44,52,0.8));
-          color: #e5e7eb;
+          background: linear-gradient(135deg, rgba(40,44,52,0.9), rgba(40,44,52,0.8)); color:#e5e7eb;
         }
         #olm-toggle-btn.show{ display:flex; }
-        #olm-toggle-btn:active{ transform: scale(0.98); }
+        #olm-toggle-btn:active{ transform: scale(.98); }
       `;
       const style = document.createElement("style");
-      style.textContent = styles;
-      document.head.appendChild(style);
+      style.textContent = css;
+      ensureHead(style);
     }
 
     createUI() {
@@ -341,109 +279,71 @@
       this.container.style.width = this.size.w + "px";
       this.container.style.height = this.size.h + "px";
 
-      // Topbar
+      // Topbar (drag handle by pointer events)
       const topbar = document.createElement("div");
       topbar.className = "olm-topbar";
-      topbar.dataset.dragHandle = "true";
+      topbar.addEventListener("pointerdown", this.onPointerDownDrag);
 
       const brand = document.createElement("div");
       brand.className = "olm-brand";
-      const logo = document.createElement("div");
-      logo.className = "olm-logo";
-      logo.textContent = "OLM";
+      const logo = document.createElement("div"); logo.className = "olm-logo"; logo.textContent = "OLM";
       const titleWrap = document.createElement("div");
-      const title = document.createElement("div");
-      title.className = "olm-title";
-      title.textContent = "OLM Helper";
-      const sub = document.createElement("div");
-      sub.className = "olm-sub";
-      sub.textContent = "Edit by Đòn Hư Lém";
-      titleWrap.appendChild(title);
-      titleWrap.appendChild(sub);
-      brand.appendChild(logo);
-      brand.appendChild(titleWrap);
+      const title = document.createElement("div"); title.className = "olm-title"; title.textContent = "OLM Helper";
+      const sub = document.createElement("div"); sub.className = "olm-sub"; sub.textContent = "Edit by Đòn Hư Lém";
+      titleWrap.appendChild(title); titleWrap.appendChild(sub);
+      brand.appendChild(logo); brand.appendChild(titleWrap);
 
-      const controls = document.createElement("div");
-      controls.className = "olm-controls";
+      const controls = document.createElement("div"); controls.className = "olm-controls";
 
       const pinBtn = document.createElement("button");
-      pinBtn.className = "olm-btn";
-      pinBtn.title = "Ghim trái/phải (Alt G)";
-      pinBtn.textContent = this.pinSide === "right" ? "Ghim phải" : this.pinSide === "left" ? "Ghim trái" : "Thả tự do";
-      pinBtn.addEventListener("click", this.togglePinSide);
+      pinBtn.className = "olm-btn"; pinBtn.title = "Ghim trái/phải (Alt G)";
+      pinBtn.textContent = this.pinSide === "right" ? "R" : this.pinSide === "left" ? "R" : "L/R";
+      pinBtn.addEventListener("click", () => this.togglePinSide());
 
       const darkBtn = document.createElement("button");
-      darkBtn.className = "olm-btn";
-      darkBtn.title = "Dark mode (Alt D)";
-      darkBtn.textContent = this.dark ? "Dark: On" : "Dark: Off";
-      darkBtn.addEventListener("click", this.toggleDarkMode);
+      darkBtn.className = "olm-btn"; darkBtn.title = "Dark mode (Alt D)";
+      darkBtn.textContent = this.dark ? "D/L" : "D/L";
+      darkBtn.addEventListener("click", () => this.toggleDarkMode());
 
       const collapseBtn = document.createElement("button");
-      collapseBtn.className = "olm-btn";
-      collapseBtn.title = "Ẩn/Hiện (Shift phải)";
-      collapseBtn.textContent = "Ẩn/Hiện";
+      collapseBtn.className = "olm-btn"; collapseBtn.title = "Ẩn/Hiện (Shift phải)";
+      collapseBtn.textContent = "Hide";
       collapseBtn.addEventListener("click", () => this.toggleVisibility());
 
       const exportBtnTop = document.createElement("button");
-      exportBtnTop.id = "export-btn";
-      exportBtnTop.textContent = "Xuất TXT";
-      exportBtnTop.addEventListener("click", this.exportToTxt);
+      exportBtnTop.id = "export-btn"; exportBtnTop.textContent = "Xuất TXT";
+      exportBtnTop.addEventListener("click", () => this.exportToTxt());
 
-      controls.appendChild(pinBtn);
-      controls.appendChild(darkBtn);
-      controls.appendChild(collapseBtn);
-      controls.appendChild(exportBtnTop);
-
-      topbar.appendChild(brand);
-      topbar.appendChild(controls);
+      controls.append(pinBtn, darkBtn, collapseBtn, exportBtnTop);
+      topbar.append(brand, controls);
 
       // Search
-      const searchWrap = document.createElement("div");
-      searchWrap.className = "search-wrap";
+      const searchWrap = document.createElement("div"); searchWrap.className = "search-wrap";
       const searchInput = document.createElement("input");
       searchInput.className = "search-input";
       searchInput.placeholder = "Tìm theo từ khóa (Alt F để focus)";
       searchInput.addEventListener("input", (e) => this.filterDebounced(e.target.value));
-      const meta = document.createElement("div");
-      meta.className = "meta";
-      meta.id = "meta-info";
-      meta.textContent = "0 câu";
-      searchWrap.appendChild(searchInput);
-      searchWrap.appendChild(meta);
+      const meta = document.createElement("div"); meta.className = "meta"; meta.id = "meta-info"; meta.textContent = "0 câu";
+      searchWrap.append(searchInput, meta);
 
       // Content
-      this.contentArea = document.createElement("div");
-      this.contentArea.id = "olm-answers-content";
+      this.contentArea = document.createElement("div"); this.contentArea.id = "olm-answers-content";
 
       // Footer
-      const footer = document.createElement("div");
-      footer.className = "footer-bar";
-      const hint = document.createElement("div");
-      hint.style.fontSize = "12px";
-      hint.style.color = "var(--muted)";
+      const footer = document.createElement("div"); footer.className = "footer-bar";
+      const hint = document.createElement("div"); hint.style.fontSize = "12px"; hint.style.color = "var(--muted)";
       hint.textContent = "Shift phải: ẩn/hiện • Alt F: tìm • Alt A: copy đáp án hiển thị";
-      const countBadge = document.createElement("div");
-      countBadge.id = "count-badge";
-      countBadge.textContent = "0 câu";
-      footer.appendChild(hint);
-      footer.appendChild(countBadge);
+      const countBadge = document.createElement("div"); countBadge.id = "count-badge"; countBadge.textContent = "0 câu";
+      footer.append(hint, countBadge);
 
-      this.container.appendChild(topbar);
-      this.container.appendChild(searchWrap);
-      this.container.appendChild(this.contentArea);
-      this.container.appendChild(footer);
-
-      // Resize handle
+      // Resize handle by pointer
       const handle = document.createElement("div");
-      handle.className = "resize-handle";
-      handle.title = "Kéo để thay đổi kích thước";
-      handle.addEventListener("mousedown", this.onResizeDown);
-      this.container.appendChild(handle);
+      handle.className = "resize-handle"; handle.title = "Kéo để đổi kích thước";
+      handle.addEventListener("pointerdown", this.onPointerDownResize);
       this.resizeHandle = handle;
 
-      const appendToBody = () => document.body.appendChild(this.container);
-      if (document.body) appendToBody();
-      else window.addEventListener("DOMContentLoaded", appendToBody);
+      this.container.append(topbar, searchWrap, this.contentArea, footer, handle);
+      ensureBody(this.container);
 
       this.topbar = topbar;
       this.searchInput = searchInput;
@@ -452,90 +352,109 @@
       this.pinBtn = pinBtn;
       this.darkBtn = darkBtn;
 
-      // ===== Create floating toggle button =====
+      // Toggle floating button
       const tbtn = document.createElement("div");
-      tbtn.id = "olm-toggle-btn";
-      tbtn.title = "Hiện OLM Helper";
-      tbtn.textContent = "OLM";
-      tbtn.addEventListener("click", () => {
-        this.isVisible = true;
-        this.container.classList.remove("hidden");
-        this.hideToggleBtn();
-      });
-      const addToggle = () => document.body.appendChild(tbtn);
-      if (document.body) addToggle(); else window.addEventListener("DOMContentLoaded", addToggle);
+      tbtn.id = "olm-toggle-btn"; tbtn.title = "Hiện OLM Helper"; tbtn.textContent = "OLM";
+      tbtn.addEventListener("click", () => { this.isVisible = true; this.container.classList.remove("hidden"); this.hideToggleBtn(); });
+      // Double-tap to hide quickly on mobile
+      let lastTap = 0;
+      tbtn.addEventListener("touchend", () => {
+        const now = Date.now();
+        if (now - lastTap < 350) this.toggleVisibility();
+        lastTap = now;
+      }, { passive: true });
+      ensureBody(tbtn);
       this.toggleBtn = tbtn;
     }
 
-    applyPinOrPos() {
-      const c = this.container;
-      c.style.left = "";
-      c.style.right = "";
-      c.style.top = "";
+    addEventListeners() {
+      // Keyboard shortcuts (PC). Mobile sẽ bỏ qua nếu không có phím.
+      window.addEventListener("keydown", this.onKeyDown);
+      window.addEventListener("resize", () => this.positionToggleBtn());
+      window.addEventListener("scroll", () => this.positionToggleBtn(), { passive: true });
+    }
 
-      if (this.pos && this.pinSide === "free") {
-        c.style.left = this.pos.left + "px";
-        c.style.top = this.pos.top + "px";
-      } else if (this.pinSide === "left") {
-        c.style.left = "18px";
-        c.style.right = "auto";
-        c.style.top = "18px";
-      } else {
-        c.style.right = "18px";
-        c.style.left = "auto";
-        c.style.top = "18px";
-      }
+    // Pointer drag (mouse + touch + pen)
+    onPointerDownDrag(e) {
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      // Khi kéo, chuyển sang free
+      this.pinSide = "free";
+      localStorage.setItem(LS_PIN, this.pinSide);
+      const rect = this.container.getBoundingClientRect();
+      this.container.style.right = "auto";
+      this.container.style.left = `${rect.left}px`;
+      this.container.style.top  = `${rect.top}px`;
+      this.container.style.width  = rect.width + "px";
+      this.container.style.height = rect.height + "px";
+
+      this.dragState = { dragging: true, startX: e.clientX, startY: e.clientY, initX: rect.left, initY: rect.top };
+      this.container.style.transition = "none";
+      window.addEventListener("pointermove", this.onPointerMoveDrag);
+      window.addEventListener("pointerup", this.onPointerUpDrag);
+    }
+    onPointerMoveDrag(e) {
+      if (!this.dragState.dragging) return;
+      e.preventDefault();
+      const dx = e.clientX - this.dragState.startX;
+      const dy = e.clientY - this.dragState.startY;
+      let left = this.dragState.initX + dx;
+      let top  = this.dragState.initY + dy;
+      // chặn ra ngoài màn
+      const rect = this.container.getBoundingClientRect();
+      const maxL = window.innerWidth - rect.width - 6;
+      const maxT = window.innerHeight - rect.height - 6;
+      left = Math.max(6, Math.min(maxL, left));
+      top  = Math.max(6, Math.min(maxT,  top));
+      this.container.style.left = `${left}px`;
+      this.container.style.top  = `${top}px`;
+      this.positionToggleBtn();
+    }
+    onPointerUpDrag() {
+      this.dragState.dragging = false;
+      window.removeEventListener("pointermove", this.onPointerMoveDrag);
+      window.removeEventListener("pointerup", this.onPointerUpDrag);
+      this.container.style.transition = "";
+      const rect = this.container.getBoundingClientRect();
+      this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
+      try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
+      try { localStorage.setItem(LS_POS, JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) })); } catch {}
+      this.pos = { left: Math.round(rect.left), top: Math.round(rect.top) };
       this.positionToggleBtn();
     }
 
-    positionToggleBtn() {
-      if (!this.toggleBtn) return;
-      // default top alignment with container’s top; side follows pinSide
-      let topPx = 18;
-      try {
-        const rect = this.container.getBoundingClientRect();
-        if (rect && Number.isFinite(rect.top)) {
-          topPx = Math.max(12, Math.min(window.innerHeight - 48, rect.top));
-        }
-      } catch {}
-      this.toggleBtn.style.top = topPx + "px";
-
-      if (this.pinSide === "left") {
-        this.toggleBtn.style.left = "18px";
-        this.toggleBtn.style.right = "auto";
-      } else if (this.pinSide === "right") {
-        this.toggleBtn.style.right = "18px";
-        this.toggleBtn.style.left = "auto";
-      } else {
-        // free: stick to nearest side based on current panel x
-        try {
-          const rect = this.container.getBoundingClientRect();
-          const stickRight = rect.left > window.innerWidth / 2;
-          if (stickRight) {
-            this.toggleBtn.style.right = "18px";
-            this.toggleBtn.style.left = "auto";
-          } else {
-            this.toggleBtn.style.left = "18px";
-            this.toggleBtn.style.right = "auto";
-          }
-        } catch {
-          this.toggleBtn.style.right = "18px";
-          this.toggleBtn.style.left = "auto";
-        }
-      }
+    // Pointer resize
+    onPointerDownResize(e){
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      e.preventDefault();
+      this.container.classList.add('resizing');
+      const r = this.container.getBoundingClientRect();
+      this.resizeState = { startX: e.clientX, startY: e.clientY, startW: r.width, startH: r.height };
+      window.addEventListener('pointermove', this.onPointerMoveResize);
+      window.addEventListener('pointerup', this.onPointerUpResize);
     }
-
-    showToggleBtn() { this.toggleBtn?.classList.add("show"); this.positionToggleBtn(); }
-    hideToggleBtn() { this.toggleBtn?.classList.remove("show"); }
-
-    addEventListeners() {
-      setTimeout(() => {
-        this.topbar.addEventListener("mousedown", this.onMouseDown);
-        window.addEventListener("keydown", this.onKeyDown);
-        document.getElementById("export-btn")?.addEventListener("click", this.exportToTxt);
-        window.addEventListener("resize", this.positionToggleBtn);
-        window.addEventListener("scroll", this.positionToggleBtn, { passive: true });
-      }, 300);
+    onPointerMoveResize(e){
+      if (!this.resizeState) return;
+      const minW = 320, minH = 240;
+      const maxW = Math.min(window.innerWidth - 16, 1200);
+      const maxH = Math.min(window.innerHeight - 16, 1000);
+      let newW = this.resizeState.startW + (e.clientX - this.resizeState.startX);
+      let newH = this.resizeState.startH + (e.clientY - this.resizeState.startY);
+      newW = Math.max(minW, Math.min(maxW, newW));
+      newH = Math.max(minH, Math.min(maxH, newH));
+      this.container.style.width = newW + 'px';
+      this.container.style.height = newH + 'px';
+      this.positionToggleBtn();
+    }
+    onPointerUpResize(){
+      if (!this.resizeState) return;
+      this.container.classList.remove('resizing');
+      window.removeEventListener('pointermove', this.onPointerMoveResize);
+      window.removeEventListener('pointerup', this.onPointerUpResize);
+      const rect = this.container.getBoundingClientRect();
+      this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
+      try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
+      this.resizeState = null;
+      this.positionToggleBtn();
     }
 
     exportToTxt() {
@@ -553,9 +472,7 @@
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
       link.download = `dap-an-olm-${Date.now()}.txt`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      ensureBody(link); link.click(); link.remove();
     }
 
     copyAllVisibleAnswers() {
@@ -567,83 +484,27 @@
         const a = b.querySelector(".content-container")?.innerText ?? "";
         out += `Câu ${i + 1}: ${q}\n--> ${a}\n\n`;
       });
-      navigator.clipboard?.writeText(out).catch(() => {
-        const ta = document.createElement("textarea");
-        ta.value = out; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
+      const doCopy = (txt) => navigator.clipboard?.writeText(txt).catch(() => {
+        const ta = document.createElement("textarea"); ta.value = txt; ensureBody(ta); ta.select(); document.execCommand("copy"); ta.remove();
       });
-    }
-
-    onMouseDown(event) {
-      if (event.target.closest(".olm-controls")) return;
-      this.dragState.isDragging = true;
-
-      const rect = this.container.getBoundingClientRect();
-      this.container.style.right = "auto";
-      this.container.style.left = `${rect.left}px`;
-      this.container.style.top = `${rect.top}px`;
-      this.container.style.width = rect.width + "px";
-      this.container.style.height = rect.height + "px";
-
-      this.pinSide = "free";
-      localStorage.setItem(LS_PIN, this.pinSide);
-
-      this.dragState.initialX = rect.left;
-      this.dragState.initialY = rect.top;
-      this.dragState.startX = event.clientX;
-      this.dragState.startY = event.clientY;
-      window.addEventListener("mousemove", this.onMouseMove);
-      window.addEventListener("mouseup", this.onMouseUp);
-      this.container.style.transition = "none";
-    }
-    onMouseMove(event) {
-      if (!this.dragState.isDragging) return;
-      event.preventDefault();
-      const dx = event.clientX - this.dragState.startX;
-      const dy = event.clientY - this.dragState.startY;
-      const left = this.dragState.initialX + dx;
-      const top = this.dragState.initialY + dy;
-      this.container.style.left = `${left}px`;
-      this.container.style.top = `${top}px`;
-      this.positionToggleBtn();
-    }
-    onMouseUp() {
-      this.dragState.isDragging = false;
-      window.removeEventListener("mousemove", this.onMouseMove);
-      window.removeEventListener("mouseup", this.onMouseUp);
-      this.container.style.transition = "";
-      const rect = this.container.getBoundingClientRect();
-      this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
-      try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
-      try { localStorage.setItem(LS_POS, JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) })); } catch {}
-      this.pos = { left: Math.round(rect.left), top: Math.round(rect.top) };
-      this.positionToggleBtn();
+      doCopy(out);
     }
 
     onKeyDown(event) {
       if (event.code === "ShiftRight") this.toggleVisibility();
       if (event.altKey && !event.shiftKey && !event.ctrlKey) {
-        if (event.key.toLowerCase() === "f") {
-          event.preventDefault();
-          this.searchInput.focus();
-          this.searchInput.select();
-        } else if (event.key.toLowerCase() === "a") {
-          event.preventDefault();
-          this.copyAllVisibleAnswers();
-        } else if (event.key.toLowerCase() === "d") {
-          event.preventDefault();
-          this.toggleDarkMode();
-        } else if (event.key.toLowerCase() === "g") {
-          event.preventDefault();
-          this.togglePinSide();
-        }
+        const k = event.key.toLowerCase();
+        if (k === "f") { event.preventDefault(); this.searchInput.focus(); this.searchInput.select(); }
+        else if (k === "a") { event.preventDefault(); this.copyAllVisibleAnswers(); }
+        else if (k === "d") { event.preventDefault(); this.toggleDarkMode(); }
+        else if (k === "g") { event.preventDefault(); this.togglePinSide(); }
       }
     }
 
     toggleVisibility() {
       this.isVisible = !this.isVisible;
       this.container.classList.toggle("hidden", !this.isVisible);
-      if (this.isVisible) this.hideToggleBtn();
-      else this.showToggleBtn();
+      if (this.isVisible) this.hideToggleBtn(); else this.showToggleBtn();
     }
 
     toggleDarkMode() {
@@ -662,14 +523,61 @@
       this.applyPinOrPos();
     }
 
-    // ---------- Answer extraction ----------
+    applyPinOrPos() {
+      const c = this.container; c.style.left = ""; c.style.right = ""; c.style.top = "";
+      if (this.pos && this.pinSide === "free") {
+        c.style.left = this.pos.left + "px";
+        c.style.top = this.pos.top + "px";
+      } else if (this.pinSide === "left") {
+        c.style.left = "12px"; c.style.right = "auto"; c.style.top = "12px";
+      } else {
+        c.style.right = "12px"; c.style.left = "auto"; c.style.top = "12px";
+      }
+      this.positionToggleBtn();
+    }
+
+    positionToggleBtn() {
+      if (!this.toggleBtn) return;
+      let topPx = 12;
+      try {
+        const rect = this.container.getBoundingClientRect();
+        if (rect && Number.isFinite(rect.top)) {
+          topPx = Math.max(12, Math.min(window.innerHeight - 52, rect.top));
+        }
+      } catch {}
+      this.toggleBtn.style.top = topPx + "px";
+      if (this.pinSide === "left") { this.toggleBtn.style.left = "12px"; this.toggleBtn.style.right = "auto"; }
+      else if (this.pinSide === "right") { this.toggleBtn.style.right = "12px"; this.toggleBtn.style.left = "auto"; }
+      else {
+        try {
+          const rect = this.container.getBoundingClientRect();
+          const stickRight = rect.left > window.innerWidth / 2;
+          if (stickRight) { this.toggleBtn.style.right = "12px"; this.toggleBtn.style.left = "auto"; }
+          else { this.toggleBtn.style.left = "12px"; this.toggleBtn.style.right = "auto"; }
+        } catch { this.toggleBtn.style.right = "12px"; this.toggleBtn.style.left = "auto"; }
+      }
+    }
+    showToggleBtn(){ this.toggleBtn?.classList.add("show"); this.positionToggleBtn(); }
+    hideToggleBtn(){ this.toggleBtn?.classList.remove("show"); }
+
+    // ==== render ====
+    renderContentWithMath(element) {
+      const tryRender = () => {
+        try {
+          if (UW.MathJax?.typesetPromise) UW.MathJax.typesetPromise([element]).catch(() => {});
+          else if (UW.MathJax?.Hub) UW.MathJax.Hub.Queue(["Typeset", UW.MathJax.Hub, element]);
+        } catch (e) { console.error("Math render error:", e); }
+      };
+      setTimeout(tryRender, 50);
+      setTimeout(tryRender, 250);
+      setTimeout(tryRender, 600);
+    }
+
     getAnswersAsDOM(question) {
       const listElement = document.createElement("ul");
-
       if (question.json_content) {
         try {
           const jsonData = JSON.parse(question.json_content);
-
           const correctNodes = [];
           const collect = (node) => {
             if (!node || typeof node !== "object") return;
@@ -677,37 +585,28 @@
             if (Array.isArray(node.children)) node.children.forEach(collect);
           };
           collect(jsonData.root);
-
           const extractText = (node) => {
             if (!node) return "";
-            let out = "";
-            if (typeof node.text === "string") out += node.text;
+            let out = ""; if (typeof node.text === "string") out += node.text;
             if (Array.isArray(node.children)) for (const ch of node.children) out += extractText(ch);
             return out;
           };
-
           if (correctNodes.length > 0) {
             correctNodes.forEach((n) => {
-              const li = document.createElement("li");
-              li.className = "correct-answer";
-              li.innerHTML = extractText(n).trim();
-              listElement.appendChild(li);
+              const li = document.createElement("li"); li.className = "correct-answer";
+              li.innerHTML = extractText(n).trim(); listElement.appendChild(li);
             });
             return listElement;
           }
-        } catch (e) {
-          console.error("Lỗi phân tích JSON:", e);
-        }
+        } catch (e) { console.error("Lỗi phân tích JSON:", e); }
       }
-
       // HTML cũ
       const tempDiv = document.createElement("div");
       tempDiv.innerHTML = decodeBase64Utf8(question.content || "");
       const correctAnswers = tempDiv.querySelectorAll(".correctAnswer");
       if (correctAnswers.length > 0) {
         correctAnswers.forEach((ans) => {
-          const li = document.createElement("li");
-          li.className = "correct-answer";
+          const li = document.createElement("li"); li.className = "correct-answer";
           while (ans.firstChild) li.appendChild(ans.firstChild.cloneNode(true));
           listElement.appendChild(li);
         });
@@ -716,9 +615,7 @@
       const fillInInput = tempDiv.querySelector("input[data-accept]");
       if (fillInInput) {
         fillInInput.getAttribute("data-accept").split("|").forEach((a) => {
-          const li = document.createElement("li");
-          li.className = "correct-answer";
-          li.textContent = a.trim();
+          const li = document.createElement("li"); li.className = "correct-answer"; li.textContent = a.trim();
           listElement.appendChild(li);
         });
         return listElement;
@@ -729,35 +626,15 @@
     getSolutionAsDOM(decodedContent) {
       const tempDiv = document.createElement("div");
       tempDiv.innerHTML = decodedContent;
-      const solutionNode = tempDiv.querySelector(
-        ".loigiai, .huong-dan-giai, .explain, .solution, #solution, .guide, .exp, .exp-in"
-      );
+      const solutionNode = tempDiv.querySelector(".loigiai, .huong-dan-giai, .explain, .solution, #solution, .guide, .exp, .exp-in");
       return solutionNode ? solutionNode.cloneNode(true) : null;
     }
 
-    renderContentWithMath(element) {
-      const tryRender = () => {
-        try {
-          if (unsafeWindow.MathJax && unsafeWindow.MathJax.typesetPromise) {
-            unsafeWindow.MathJax.typesetPromise([element]).catch(() => {});
-          } else if (unsafeWindow.MathJax && unsafeWindow.MathJax.Hub) {
-            unsafeWindow.MathJax.Hub.Queue(["Typeset", unsafeWindow.MathJax.Hub, element]);
-          }
-        } catch (e) {
-          console.error("Math render error:", e);
-        }
-      };
-      setTimeout(tryRender, 50);
-      setTimeout(tryRender, 250);
-      setTimeout(tryRender, 600);
-    }
-
-    // ---------- Render packet ----------
     renderData(data) {
       if (!Array.isArray(data)) return;
       const responseContainer = document.createElement("div");
       const timestamp = new Date().toLocaleTimeString();
-      responseContainer.innerHTML = `<p style="font-family: monospace; font-size: 12px; background: rgba(0,0,0,0.06); padding: 6px; border-radius: 6px;"><b>Time:</b> ${timestamp}</p>`;
+      responseContainer.innerHTML = `<p style="font-family:monospace;font-size:12px;background:rgba(0,0,0,0.06);padding:6px;border-radius:6px;"><b>Time:</b> ${timestamp}</p>`;
 
       data.forEach((question) => {
         let decodedContent = decodeBase64Utf8(question.content || "");
@@ -768,114 +645,58 @@
 
         const tempDiv = document.createElement("div");
         tempDiv.innerHTML = decodedContent;
-        tempDiv.querySelectorAll(
-          "ol.quiz-list, ul.quiz-list, .interaction, .form-group, .loigiai, .huong-dan-giai, .explain, .solution, #solution, .guide, .exp, .exp-in"
-        ).forEach((el) => el.remove());
+        tempDiv.querySelectorAll("ol.quiz-list, ul.quiz-list, .interaction, .form-group, .loigiai, .huong-dan-giai, .explain, .solution, #solution, .guide, .exp, .exp-in").forEach(el => el.remove());
 
-        const questionDiv = document.createElement("div");
-        questionDiv.className = "qa-block";
+        const questionDiv = document.createElement("div"); questionDiv.className = "qa-block";
 
-        const qaTop = document.createElement("div");
-        qaTop.className = "qa-top";
+        const qaTop = document.createElement("div"); qaTop.className = "qa-top";
+        const questionDisplayContainer = document.createElement("div"); questionDisplayContainer.className = "question-content";
 
-        const questionDisplayContainer = document.createElement("div");
-        questionDisplayContainer.className = "question-content";
-
-        const indexSpan = document.createElement("span");
-        indexSpan.className = "q-index";
-        indexSpan.textContent = "Câu ?. ";
+        const indexSpan = document.createElement("span"); indexSpan.className = "q-index"; indexSpan.textContent = "Câu ?. ";
         questionDisplayContainer.appendChild(indexSpan);
-
         while (tempDiv.firstChild) questionDisplayContainer.appendChild(tempDiv.firstChild);
-        if (!questionDisplayContainer.hasChildNodes() && question.title)
-          questionDisplayContainer.innerHTML = `<span class="q-index">Câu ?. </span>${question.title}`;
+        if (!questionDisplayContainer.hasChildNodes() && question.title) questionDisplayContainer.innerHTML = `<span class="q-index">Câu ?. </span>${question.title}`;
 
-        const actions = document.createElement("div");
-        actions.className = "qa-actions";
+        const actions = document.createElement("div"); actions.className = "qa-actions";
+        const pill = document.createElement("div"); pill.className = "pill"; pill.textContent = answersElement ? "Đ" : solutionElement ? "L" : "?";
+        if (answersElement) pill.classList.add("ok"); else if (solutionElement) pill.classList.add("sol");
 
-        const pill = document.createElement("div");
-        pill.className = "pill";
-        pill.textContent = answersElement ? "Đ" : solutionElement ? "L" : "?";
-        if (answersElement) pill.classList.add("ok");
-        else if (solutionElement) pill.classList.add("sol");
-
-        const toggleOne = document.createElement("button");
-        toggleOne.className = "toggle-one";
-        toggleOne.textContent = "Thu gọn";
+        const toggleOne = document.createElement("button"); toggleOne.className = "toggle-one"; toggleOne.textContent = "Thu gọn";
         toggleOne.addEventListener("click", () => {
           contentContainer.style.display = contentContainer.style.display === "none" ? "" : "none";
           toggleOne.textContent = contentContainer.style.display === "none" ? "Mở rộng" : "Thu gọn";
           if (contentContainer.style.display !== "none") this.renderContentWithMath(contentContainer);
         });
 
-        const copyAns = document.createElement("button");
-        copyAns.className = "copy-btn";
-        copyAns.textContent = "Copy đáp án";
-        copyAns.title = "Copy đáp án / lời giải";
+        const copyAns = document.createElement("button"); copyAns.className = "copy-btn"; copyAns.textContent = "Copy đáp án"; copyAns.title = "Copy đáp án / lời giải";
         copyAns.addEventListener("click", () => {
-          const txt = (contentContainer ? contentContainer.innerText : "").trim();
-          if (!txt) return;
-          navigator.clipboard?.writeText(txt).then(() => {
-            copyAns.textContent = "Copied";
-            setTimeout(() => (copyAns.textContent = "Copy đáp án"), 900);
-          }).catch(() => {
-            const ta = document.createElement("textarea");
-            ta.value = txt; document.body.appendChild(ta); ta.select();
-            try { document.execCommand("copy"); copyAns.textContent = "Copied"; } catch(e) {}
-            document.body.removeChild(ta);
-            setTimeout(() => (copyAns.textContent = "Copy đáp án"), 900);
-          });
+          const txt = (contentContainer ? contentContainer.innerText : "").trim(); if (!txt) return;
+          const doCopy = () => navigator.clipboard?.writeText(txt).then(() => { copyAns.textContent = "Copied"; setTimeout(() => (copyAns.textContent = "Copy đáp án"), 900); })
+          .catch(() => { const ta = document.createElement("textarea"); ta.value = txt; ensureBody(ta); ta.select(); try { document.execCommand("copy"); copyAns.textContent = "Copied"; } catch(e) {} ta.remove(); setTimeout(() => (copyAns.textContent = "Copy đáp án"), 900); });
+          doCopy();
         });
 
-        const copyQ = document.createElement("button");
-        copyQ.className = "copy-q";
-        copyQ.textContent = "Copy câu hỏi";
+        const copyQ = document.createElement("button"); copyQ.className = "copy-q"; copyQ.textContent = "Copy câu hỏi";
         copyQ.addEventListener("click", () => {
-          const txt = (questionDisplayContainer?.innerText || "").trim();
-          if (!txt) return;
-          navigator.clipboard?.writeText(txt).catch(() => {
-            const ta = document.createElement("textarea");
-            ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
-          });
+          const txt = (questionDisplayContainer?.innerText || "").trim(); if (!txt) return;
+          navigator.clipboard?.writeText(txt).catch(() => { const ta = document.createElement("textarea"); ta.value = txt; ensureBody(ta); ta.select(); document.execCommand("copy"); ta.remove(); });
         });
 
-        actions.appendChild(pill);
-        actions.appendChild(toggleOne);
-        actions.appendChild(copyQ);
-        actions.appendChild(copyAns);
+        actions.append(pill, toggleOne, copyQ, copyAns);
+        qaTop.append(questionDisplayContainer, actions);
 
-        qaTop.appendChild(questionDisplayContainer);
-        qaTop.appendChild(actions);
+        const contentContainer = document.createElement("div"); contentContainer.className = "content-container";
+        if (answersElement) { contentContainer.dataset.type = "answer"; contentContainer.appendChild(answersElement); }
+        else if (solutionElement) { contentContainer.dataset.type = "solution"; contentContainer.appendChild(solutionElement); }
+        else { contentContainer.dataset.type = "not-found"; const nf = document.createElement("div"); nf.className = "not-found"; nf.textContent = "Không tìm thấy đáp án hay lời giải."; contentContainer.appendChild(nf); }
 
-        const contentContainer = document.createElement("div");
-        contentContainer.className = "content-container";
-
-        if (answersElement) {
-          contentContainer.dataset.type = "answer";
-          contentContainer.appendChild(answersElement);
-        } else if (solutionElement) {
-          contentContainer.dataset.type = "solution";
-          contentContainer.appendChild(solutionElement);
-        } else {
-          contentContainer.dataset.type = "not-found";
-          const nf = document.createElement("div");
-          nf.className = "not-found";
-          nf.textContent = "Không tìm thấy đáp án hay lời giải.";
-          contentContainer.appendChild(nf);
-        }
-
-        questionDiv.appendChild(qaTop);
-        questionDiv.appendChild(contentContainer);
+        questionDiv.append(qaTop, contentContainer);
         responseContainer.appendChild(questionDiv);
       });
 
       this.contentArea.prepend(responseContainer);
-      this.renumber();
-      this.updateCounts();
-      this.renderContentWithMath(this.contentArea);
-
-      const kw = this.searchInput?.value?.trim();
-      if (kw) highlightInElement(this.contentArea, kw);
+      this.renumber(); this.updateCounts(); this.renderContentWithMath(this.contentArea);
+      const kw = this.searchInput?.value?.trim(); if (kw) highlightInElement(this.contentArea, kw);
     }
 
     renumber() {
@@ -883,88 +704,40 @@
       let idx = 1;
       blocks.forEach((b) => {
         if (b.style.display === "none") return;
-        const sp = b.querySelector(".q-index");
-        if (sp) sp.textContent = `Câu ${idx}. `;
+        const sp = b.querySelector(".q-index"); if (sp) sp.textContent = `Câu ${idx}. `;
         idx++;
       });
     }
-
     updateCounts() {
       const cnt = this.contentArea.querySelectorAll(".qa-block").length;
       const shown = [...this.contentArea.querySelectorAll(".qa-block")].filter(b => b.style.display !== "none").length;
       this.countBadge.textContent = `${shown} / ${cnt} hiển thị`;
       this.metaInfo.textContent = `${cnt} câu`;
     }
-
     filterQuestions(keyword) {
       const q = (keyword || "").trim().toLowerCase();
       const blocks = this.contentArea.querySelectorAll(".qa-block");
       let shown = 0;
       blocks.forEach((b) => {
-        highlightInElement(b, ""); // clear
+        highlightInElement(b, "");
         const text = b.innerText.toLowerCase();
         const match = !q || text.includes(q);
         b.style.display = match ? "" : "none";
-        if (match) {
-          shown++;
-          if (q) highlightInElement(b, q);
-        }
+        if (match) { shown++; if (q) highlightInElement(b, q); }
       });
       this.countBadge.textContent = `${shown} / ${blocks.length} hiển thị`;
-      this.renumber();
-      this.renderContentWithMath(this.contentArea);
-    }
-
-    onResizeDown(e){
-      e.preventDefault();
-      this.container.classList.add('resizing');
-      this.resizeState = {
-        startX: e.clientX,
-        startY: e.clientY,
-        startW: this.container.getBoundingClientRect().width,
-        startH: this.container.getBoundingClientRect().height
-      };
-      window.addEventListener('mousemove', this.onResizeMove);
-      window.addEventListener('mouseup', this.onResizeUp);
-    }
-
-    onResizeMove(e){
-      if (!this.resizeState) return;
-      const minW = 340, minH = 260;
-      const maxW = Math.min(window.innerWidth - 24, 1200);
-      const maxH = Math.min(window.innerHeight - 24, 1000);
-
-      let newW = this.resizeState.startW + (e.clientX - this.resizeState.startX);
-      let newH = this.resizeState.startH + (e.clientY - this.resizeState.startY);
-      newW = Math.max(minW, Math.min(maxW, newW));
-      newH = Math.max(minH, Math.min(maxH, newH));
-
-      this.container.style.width = newW + 'px';
-      this.container.style.height = newH + 'px';
-      this.positionToggleBtn();
-    }
-
-    onResizeUp(){
-      if (!this.resizeState) return;
-      this.container.classList.remove('resizing');
-      window.removeEventListener('mousemove', this.onResizeMove);
-      window.removeEventListener('mouseup', this.onResizeUp);
-      const rect = this.container.getBoundingClientRect();
-      this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
-      try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
-      this.resizeState = null;
-      this.positionToggleBtn();
+      this.renumber(); this.renderContentWithMath(this.contentArea);
     }
   }
 
   const answerUI = new AnswerDisplay();
   answerUI.init();
 
-  // ---------- Network hooks ----------
-  const originalFetch = unsafeWindow.fetch;
-  unsafeWindow.fetch = function (...args) {
+  // ===== Network hooks (robust for mobile) =====
+  const originalFetch = UW.fetch.bind(UW);
+  UW.fetch = function (...args) {
     const requestUrl = args[0] instanceof Request ? args[0].url : args[0];
-    const p = originalFetch.apply(this, args);
+    const p = originalFetch(...args);
     try {
       if (typeof requestUrl === "string" && requestUrl.includes(TARGET_URL_KEYWORD)) {
         p.then((response) => {
@@ -977,18 +750,19 @@
     return p;
   };
 
-  const originalSend = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.send = function (...args) {
+  const origOpen = UW.XMLHttpRequest.prototype.open;
+  const origSend = UW.XMLHttpRequest.prototype.send;
+  UW.XMLHttpRequest.prototype.open = function (...args) {
+    this._olm_url = args[1] || ""; return origOpen.apply(this, args);
+  };
+  UW.XMLHttpRequest.prototype.send = function (...args) {
     this.addEventListener("load", () => {
       try {
-        if (this.responseURL?.includes(TARGET_URL_KEYWORD) && this.status === 200) {
-          try {
-            const data = JSON.parse(this.responseText);
-            answerUI.renderData(data);
-          } catch (e) { console.error(e); }
+        if ((this._olm_url || this.responseURL || "").includes(TARGET_URL_KEYWORD) && this.status === 200) {
+          try { const data = JSON.parse(this.responseText); answerUI.renderData(data); } catch (e) { console.error(e); }
         }
       } catch (e) {}
     });
-    return originalSend.apply(this, args);
+    return origSend.apply(this, args);
   };
 })();
