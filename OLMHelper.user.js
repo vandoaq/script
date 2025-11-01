@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OLM Helper
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  Hack Đáp Án OLM edit by Đòn Hư Lém
+// @version      1.4
+// @description  Hack Đáp Án OLM by Đòn Hư Lém
 // @author       Đòn Hư Lém
 // @match        https://olm.vn/chu-de/*
 // @grant        unsafeWindow
@@ -17,7 +17,7 @@
   const LS_SIZE = "olm_size";
   const LS_POS = "olm_pos";
   const LS_DARK = "olm_dark";
-  const LS_PIN = "olm_pin"; // 'right' | 'left'
+  const LS_PIN = "olm_pin"; // 'right' | 'left' | 'free'
   const HIGHLIGHT_CLASS = "olm-hl";
 
   // ---------- Math engine: MathJax v3 ----------
@@ -70,17 +70,15 @@
     }
   }
 
-  // rất nhẹ: vá vài trường hợp $$ ... $ hoặc $ ... $$ bị lẻ
+  // vá cặp $/$$ bị lệch nhẹ
   function mildLatexFix(html) {
-    // Không phá nội dung; chỉ thay các $$...$ hoặc $...$$ thành $$...$$ nếu khá rõ ràng
     return html
       .replace(/\$\$([^$]+)\$(?!\$)/g, "$$$$${1}$$")
       .replace(/\$(?!\$)([^$]+)\$\$/g, "$$${1}$$");
   }
 
-  // Highlight hỗ trợ case-insensitive, giữ nguyên HTML
+  // Highlight giữ DOM
   function highlightInElement(el, keyword) {
-    // xóa highlight cũ
     el.querySelectorAll("." + HIGHLIGHT_CLASS).forEach(n => {
       const parent = n.parentNode;
       while (n.firstChild) parent.insertBefore(n.firstChild, n);
@@ -90,9 +88,8 @@
     if (!keyword) return;
 
     const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
-    const parts = [];
-    let node;
     const regex = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    let node;
     while ((node = walk.nextNode())) {
       const t = node.nodeValue;
       if (!t || !t.trim()) continue;
@@ -120,8 +117,8 @@
       this.isVisible = true;
       this.dragState = { isDragging: false, startX: 0, startY: 0, initialX: 0, initialY: 0 };
       this.size = { w: 520, h: Math.round(window.innerHeight * 0.7) };
-      this.pos = null; // {left, top} khi unpinned
-      this.pinSide = localStorage.getItem(LS_PIN) || "right"; // 'right' or 'left'
+      this.pos = null; // {left, top} khi free
+      this.pinSide = localStorage.getItem(LS_PIN) || "right";
       this.dark = (() => {
         const saved = localStorage.getItem(LS_DARK);
         if (saved !== null) return saved === "1";
@@ -150,10 +147,15 @@
       this.toggleDarkMode = this.toggleDarkMode.bind(this);
       this.togglePinSide = this.togglePinSide.bind(this);
       this.copyAllVisibleAnswers = this.copyAllVisibleAnswers.bind(this);
-      // resize
       this.onResizeDown = this.onResizeDown.bind(this);
       this.onResizeMove = this.onResizeMove.bind(this);
       this.onResizeUp = this.onResizeUp.bind(this);
+
+      // new
+      this.toggleVisibility = this.toggleVisibility.bind(this);
+      this.showToggleBtn = this.showToggleBtn.bind(this);
+      this.hideToggleBtn = this.hideToggleBtn.bind(this);
+      this.positionToggleBtn = this.positionToggleBtn.bind(this);
     }
 
     init() {
@@ -162,6 +164,7 @@
       this.addEventListeners();
       if (this.dark) this.container.classList.add("olm-dark");
       this.applyPinOrPos();
+      this.positionToggleBtn();
     }
 
     injectCSS() {
@@ -256,7 +259,6 @@
         .content-container ul { margin:6px 0; padding-left:18px; }
         .content-container li { margin:4px 0; }
 
-        /* đáp án đúng xanh lá */
         .content-container[data-type="answer"] { font-weight: 600; }
         .content-container[data-type="answer"] li,
         .content-container[data-type="answer"] p,
@@ -279,7 +281,6 @@
 
         .not-found { color:var(--muted); font-style:italic; }
 
-        /* resize handle */
         .resize-handle{
           position:absolute; right:6px; bottom:6px;
           width:14px; height:14px; cursor: nwse-resize;
@@ -287,20 +288,45 @@
           border-bottom:2px solid rgba(0,0,0,0.25);
           opacity:.7;
         }
-
         #olm-answers-container.olm-dark .resize-handle{
           border-right-color: rgba(255,255,255,0.35);
           border-bottom-color: rgba(255,255,255,0.35);
         }
         #olm-answers-container.resizing{ user-select:none; pointer-events:auto; }
 
-        /* highlight */
         mark.${HIGHLIGHT_CLASS}{
           background: rgba(250, 204, 21, 0.35);
           padding: 0 2px; border-radius: 3px;
         }
 
         @media (max-width: 520px) { #olm-answers-container { right:8px; left:8px; width: auto; height: 68vh; } }
+
+        /* ===== Floating toggle button when panel hidden ===== */
+        #olm-toggle-btn{
+          position: fixed;
+          top: 18px;
+          right: 18px;
+          width: 36px; height: 36px;
+          border-radius: 999px;
+          display: none; align-items: center; justify-content: center;
+          z-index: 2147483647;
+          border: 1px solid var(--glass-border);
+          backdrop-filter: blur(10px) saturate(120%);
+          background: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(240,245,255,0.8));
+          box-shadow: var(--shadow);
+          cursor: pointer;
+          user-select: none;
+          font-weight: 800;
+          font-size: 11px;
+          color: #111827;
+        }
+        #olm-answers-container.olm-dark ~ #olm-toggle-btn{
+          border-color: rgba(255,255,255,0.12);
+          background: linear-gradient(135deg, rgba(40,44,52,0.9), rgba(40,44,52,0.8));
+          color: #e5e7eb;
+        }
+        #olm-toggle-btn.show{ display:flex; }
+        #olm-toggle-btn:active{ transform: scale(0.98); }
       `;
       const style = document.createElement("style");
       style.textContent = styles;
@@ -341,7 +367,7 @@
       const pinBtn = document.createElement("button");
       pinBtn.className = "olm-btn";
       pinBtn.title = "Ghim trái/phải (Alt G)";
-      pinBtn.textContent = this.pinSide === "right" ? "Ghim phải" : "Ghim trái";
+      pinBtn.textContent = this.pinSide === "right" ? "Ghim phải" : this.pinSide === "left" ? "Ghim trái" : "Thả tự do";
       pinBtn.addEventListener("click", this.togglePinSide);
 
       const darkBtn = document.createElement("button");
@@ -349,7 +375,7 @@
       darkBtn.title = "Dark mode (Alt D)";
       darkBtn.textContent = this.dark ? "Dark: On" : "Dark: Off";
       darkBtn.addEventListener("click", this.toggleDarkMode);
-      //Hack Đáp Án OLM
+
       const collapseBtn = document.createElement("button");
       collapseBtn.className = "olm-btn";
       collapseBtn.title = "Ẩn/Hiện (Shift phải)";
@@ -423,6 +449,20 @@
       this.metaInfo = meta;
       this.pinBtn = pinBtn;
       this.darkBtn = darkBtn;
+
+      // ===== Create floating toggle button =====
+      const tbtn = document.createElement("div");
+      tbtn.id = "olm-toggle-btn";
+      tbtn.title = "Hiện OLM Helper";
+      tbtn.textContent = "OLM";
+      tbtn.addEventListener("click", () => {
+        this.isVisible = true;
+        this.container.classList.remove("hidden");
+        this.hideToggleBtn();
+      });
+      const addToggle = () => document.body.appendChild(tbtn);
+      if (document.body) addToggle(); else window.addEventListener("DOMContentLoaded", addToggle);
+      this.toggleBtn = tbtn;
     }
 
     applyPinOrPos() {
@@ -443,13 +483,56 @@
         c.style.left = "auto";
         c.style.top = "18px";
       }
+      this.positionToggleBtn();
     }
+
+    positionToggleBtn() {
+      if (!this.toggleBtn) return;
+      // default top alignment with container’s top; side follows pinSide
+      let topPx = 18;
+      try {
+        const rect = this.container.getBoundingClientRect();
+        if (rect && Number.isFinite(rect.top)) {
+          topPx = Math.max(12, Math.min(window.innerHeight - 48, rect.top));
+        }
+      } catch {}
+      this.toggleBtn.style.top = topPx + "px";
+
+      if (this.pinSide === "left") {
+        this.toggleBtn.style.left = "18px";
+        this.toggleBtn.style.right = "auto";
+      } else if (this.pinSide === "right") {
+        this.toggleBtn.style.right = "18px";
+        this.toggleBtn.style.left = "auto";
+      } else {
+        // free: stick to nearest side based on current panel x
+        try {
+          const rect = this.container.getBoundingClientRect();
+          const stickRight = rect.left > window.innerWidth / 2;
+          if (stickRight) {
+            this.toggleBtn.style.right = "18px";
+            this.toggleBtn.style.left = "auto";
+          } else {
+            this.toggleBtn.style.left = "18px";
+            this.toggleBtn.style.right = "auto";
+          }
+        } catch {
+          this.toggleBtn.style.right = "18px";
+          this.toggleBtn.style.left = "auto";
+        }
+      }
+    }
+
+    showToggleBtn() { this.toggleBtn?.classList.add("show"); this.positionToggleBtn(); }
+    hideToggleBtn() { this.toggleBtn?.classList.remove("show"); }
 
     addEventListeners() {
       setTimeout(() => {
         this.topbar.addEventListener("mousedown", this.onMouseDown);
         window.addEventListener("keydown", this.onKeyDown);
         document.getElementById("export-btn")?.addEventListener("click", this.exportToTxt);
+        window.addEventListener("resize", this.positionToggleBtn);
+        window.addEventListener("scroll", this.positionToggleBtn, { passive: true });
       }, 300);
     }
 
@@ -473,7 +556,6 @@
       document.body.removeChild(link);
     }
 
-    // copy mọi đáp án đang hiển thị
     copyAllVisibleAnswers() {
       const blocks = [...this.contentArea.querySelectorAll(".qa-block")].filter(b => b.style.display !== "none");
       if (!blocks.length) return;
@@ -520,18 +602,19 @@
       const top = this.dragState.initialY + dy;
       this.container.style.left = `${left}px`;
       this.container.style.top = `${top}px`;
+      this.positionToggleBtn();
     }
     onMouseUp() {
       this.dragState.isDragging = false;
       window.removeEventListener("mousemove", this.onMouseMove);
       window.removeEventListener("mouseup", this.onMouseUp);
       this.container.style.transition = "";
-      //Hack Đáp Án OLM
       const rect = this.container.getBoundingClientRect();
       this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
       try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
       try { localStorage.setItem(LS_POS, JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) })); } catch {}
       this.pos = { left: Math.round(rect.left), top: Math.round(rect.top) };
+      this.positionToggleBtn();
     }
 
     onKeyDown(event) {
@@ -553,16 +636,21 @@
         }
       }
     }
+
     toggleVisibility() {
       this.isVisible = !this.isVisible;
       this.container.classList.toggle("hidden", !this.isVisible);
+      if (this.isVisible) this.hideToggleBtn();
+      else this.showToggleBtn();
     }
+
     toggleDarkMode() {
       this.dark = !this.dark;
       this.container.classList.toggle("olm-dark", this.dark);
       this.darkBtn.textContent = this.dark ? "Dark: On" : "Dark: Off";
       try { localStorage.setItem(LS_DARK, this.dark ? "1" : "0"); } catch {}
     }
+
     togglePinSide() {
       if (this.pinSide === "right") this.pinSide = "left";
       else if (this.pinSide === "left") this.pinSide = "free";
@@ -580,7 +668,6 @@
         try {
           const jsonData = JSON.parse(question.json_content);
 
-          // Thu thập mọi node correct
           const correctNodes = [];
           const collect = (node) => {
             if (!node || typeof node !== "object") return;
@@ -589,7 +676,6 @@
           };
           collect(jsonData.root);
 
-          // Rút text
           const extractText = (node) => {
             if (!node) return "";
             let out = "";
@@ -612,7 +698,7 @@
         }
       }
 
-      // Nhánh HTML cũ
+      // HTML cũ
       const tempDiv = document.createElement("div");
       tempDiv.innerHTML = decodeBase64Utf8(question.content || "");
       const correctAnswers = tempDiv.querySelectorAll(".correctAnswer");
@@ -647,7 +733,6 @@
       return solutionNode ? solutionNode.cloneNode(true) : null;
     }
 
-
     renderContentWithMath(element) {
       const tryRender = () => {
         try {
@@ -660,7 +745,6 @@
           console.error("Math render error:", e);
         }
       };
-      // nhiều nhịp để chắc
       setTimeout(tryRender, 50);
       setTimeout(tryRender, 250);
       setTimeout(tryRender, 600);
@@ -695,7 +779,6 @@
         const questionDisplayContainer = document.createElement("div");
         questionDisplayContainer.className = "question-content";
 
-
         const indexSpan = document.createElement("span");
         indexSpan.className = "q-index";
         indexSpan.textContent = "Câu ?. ";
@@ -720,7 +803,6 @@
         toggleOne.addEventListener("click", () => {
           contentContainer.style.display = contentContainer.style.display === "none" ? "" : "none";
           toggleOne.textContent = contentContainer.style.display === "none" ? "Mở rộng" : "Thu gọn";
-          // re-typeset khi mở ra
           if (contentContainer.style.display !== "none") this.renderContentWithMath(contentContainer);
         });
 
@@ -785,14 +867,10 @@
         responseContainer.appendChild(questionDiv);
       });
 
-
       this.contentArea.prepend(responseContainer);
-
-
       this.renumber();
       this.updateCounts();
       this.renderContentWithMath(this.contentArea);
-
 
       const kw = this.searchInput?.value?.trim();
       if (kw) highlightInElement(this.contentArea, kw);
@@ -821,7 +899,6 @@
       const blocks = this.contentArea.querySelectorAll(".qa-block");
       let shown = 0;
       blocks.forEach((b) => {
-        // xóa highlight cũ từng block
         highlightInElement(b, ""); // clear
         const text = b.innerText.toLowerCase();
         const match = !q || text.includes(q);
@@ -835,7 +912,6 @@
       this.renumber();
       this.renderContentWithMath(this.contentArea);
     }
-
 
     onResizeDown(e){
       e.preventDefault();
@@ -863,6 +939,7 @@
 
       this.container.style.width = newW + 'px';
       this.container.style.height = newH + 'px';
+      this.positionToggleBtn();
     }
 
     onResizeUp(){
@@ -874,13 +951,14 @@
       this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
       try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
       this.resizeState = null;
+      this.positionToggleBtn();
     }
   }
 
   const answerUI = new AnswerDisplay();
   answerUI.init();
 
-
+  // ---------- Network hooks ----------
   const originalFetch = unsafeWindow.fetch;
   unsafeWindow.fetch = function (...args) {
     const requestUrl = args[0] instanceof Request ? args[0].url : args[0];
@@ -896,7 +974,6 @@
     } catch (e) { console.error(e); }
     return p;
   };
-
 
   const originalSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function (...args) {
