@@ -1,11 +1,10 @@
 // ==UserScript==
-// @name         OLM Helper (Desktop + Mobile)
+// @name         OLM Helper
 // @namespace    http://tampermonkey.net/
 // @version      1.5
-// @description  Đòn Hư Lém - panel đáp án/solution hiển thị tốt trên PC & điện thoại
+// @description  Hack Đáp Án OLM edit by Đòn Hư Lém
 // @author       Đòn Hư Lém
 // @match        https://olm.vn/chu-de/*
-// @match        https://olm.vn/*
 // @grant        unsafeWindow
 // @run-at       document-start
 // @updateURL    https://github.com/vandoaq/script/raw/refs/heads/main/OLMHelper.user.js
