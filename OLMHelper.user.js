@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         OLM Helper
+// @name         OLM Helper V2
 // @namespace    http://tampermonkey.net/
-// @version      1.5
-// @description  Hack Đáp Án OLM edit by Đòn Hư Lém
+// @version      1.7
+// @description  Panel đáp án/solution hiển thị tốt trên PC & điện thoại.
 // @author       Đòn Hư Lém
 // @match        https://olm.vn/chu-de/*
 // @grant        unsafeWindow
@@ -15,17 +15,13 @@
 (function () {
   "use strict";
 
-  // ==== Robust window bridge for mobile ====
   const UW = (typeof unsafeWindow !== "undefined" && unsafeWindow) ? unsafeWindow : window;
-
   const TARGET_URL_KEYWORD = "get-question-of-ids";
   const LS_SIZE = "olm_size";
-  const LS_POS = "olm_pos";
+  const LS_POS  = "olm_pos";
   const LS_DARK = "olm_dark";
-  const LS_PIN  = "olm_pin"; // 'right' | 'left' | 'free'
   const HIGHLIGHT_CLASS = "olm-hl";
 
-  // ===== Utilities =====
   const ready = (fn) => {
     if (document.readyState === "complete" || document.readyState === "interactive") fn();
     else document.addEventListener("DOMContentLoaded", fn, { once: true });
@@ -38,9 +34,7 @@
     if (document.body) document.body.appendChild(node);
     else ready(() => document.body.appendChild(node));
   };
-  const debounce = (fn, ms) => {
-    let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
-  };
+  const debounce = (fn, ms) => { let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); }; };
 
   function decodeBase64Utf8(base64) {
     try {
@@ -82,18 +76,14 @@
     }
   }
 
-  // ===== MathJax v3 loader (safe for mobile) =====
+  // MathJax
   function ensureMathJax() {
     if (UW.MathJax) return;
     const cfg = document.createElement("script");
     cfg.type = "text/javascript";
     cfg.text = `
       window.MathJax = {
-        tex: {
-          inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
-          displayMath: [['$$','$$'], ['\\\\[','\\\\]']],
-          processEscapes: true, processEnvironments: true
-        },
+        tex: { inlineMath: [['$', '$'], ['\\\\(', '\\\\)']], displayMath: [['$$','$$'], ['\\\\[','\\\\]']], processEscapes: true, processEnvironments: true },
         options: { skipHtmlTags: ['noscript','style','textarea','pre','code'], ignoreHtmlClass: 'no-mathjax', renderActions: { addMenu: [] } },
         startup: { typeset: false }
       };
@@ -106,18 +96,31 @@
   }
   ensureMathJax();
 
-  // ===== UI =====
+  // html2pdf
+  let html2pdfReadyPromise = null;
+  function ensureHtml2Pdf() {
+    if (UW.html2pdf) return Promise.resolve();
+    if (html2pdfReadyPromise) return html2pdfReadyPromise;
+    html2pdfReadyPromise = new Promise((res, rej) => {
+      const sc = document.createElement("script");
+      sc.src = "https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js";
+      sc.async = true;
+      sc.onload = () => res();
+      sc.onerror = () => rej(new Error("Không tải được html2pdf.js"));
+      ensureHead(sc);
+    });
+    return html2pdfReadyPromise;
+  }
+
   class AnswerDisplay {
     constructor() {
       this.isVisible = true;
       this.dragState = { dragging: false, startX: 0, startY: 0, initX: 0, initY: 0 };
       this.resizeState = null;
 
-      // size default thân thiện mobile
       const defaultH = Math.max(340, Math.round(window.innerHeight * 0.66));
       this.size = { w: Math.min(520, Math.max(340, Math.round(window.innerWidth * 0.9))), h: defaultH };
       this.pos = null;
-      this.pinSide = localStorage.getItem(LS_PIN) || "right";
       this.dark = (() => {
         const saved = localStorage.getItem(LS_DARK);
         if (saved !== null) return saved === "1";
@@ -125,18 +128,17 @@
       })();
 
       try { const saved = JSON.parse(localStorage.getItem(LS_SIZE) || "null"); if (saved?.w && saved?.h) this.size = saved; } catch {}
-      try { const p = JSON.parse(localStorage.getItem(LS_POS) || "null"); if (Number.isFinite(p?.left) && Number.isFinite(p?.top)) this.pos = p; } catch {}
+      try { const p = JSON.parse(localStorage.getItem(LS_POS)  || "null"); if (Number.isFinite(p?.left) && Number.isFinite(p?.top)) this.pos = p; } catch {}
 
       this.filterDebounced = debounce(this.filterQuestions.bind(this), 140);
 
-      // binds
       this.onKeyDown = this.onKeyDown.bind(this);
       this.onPointerDownDrag = this.onPointerDownDrag.bind(this);
       this.onPointerMoveDrag = this.onPointerMoveDrag.bind(this);
-      this.onPointerUpDrag = this.onPointerUpDrag.bind(this);
+      this.onPointerUpDrag   = this.onPointerUpDrag.bind(this);
       this.onPointerDownResize = this.onPointerDownResize.bind(this);
       this.onPointerMoveResize = this.onPointerMoveResize.bind(this);
-      this.onPointerUpResize = this.onPointerUpResize.bind(this);
+      this.onPointerUpResize   = this.onPointerUpResize.bind(this);
     }
 
     init() {
@@ -144,7 +146,7 @@
       this.createUI();
       this.addEventListeners();
       if (this.dark) this.container.classList.add("olm-dark");
-      this.applyPinOrPos();
+      this.applyPosOnly();
       this.positionToggleBtn();
     }
 
@@ -153,17 +155,17 @@
         :root{
           --panel-w: 520px;
           --panel-h: 70vh;
-          --glass-border: rgba(255,255,255,0.6);
-          --accent: #6c63ff;
-          --accent-2: #00c2ff;
-          --muted: #6b7280;
-          --success: #10b981;
-          --bg-glass: linear-gradient(135deg, rgba(255,255,255,0.62), rgba(245,248,255,0.5));
-          --bg-top: linear-gradient(180deg, rgba(255,255,255,0.4), rgba(255,255,255,0.28));
-          --bg-sub: rgba(255,255,255,0.4);
-          --shadow: 0 10px 30px rgba(17,24,39,0.25);
+          --glass-border: rgba(0,0,0,0.12);
+          --bg-glass: #ffffffcc;
+          --bg-top: #ffffffaa;
+          --bg-sub: #ffffff88;
+          --shadow: 0 10px 24px rgba(17,24,39,0.18);
           --text-main: #0f172a;
           --text-sub: #334155;
+          --muted: #6b7280;
+          --btn-bg: #f3f4f6;
+          --btn-fg: #111827;
+          --btn-border: #d1d5db;
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial;
         }
         #olm-answers-container{
@@ -186,59 +188,89 @@
 
         #olm-answers-container.olm-dark{
           --glass-border: rgba(255,255,255,0.12);
-          --bg-glass: linear-gradient(135deg, rgba(24,26,33,0.65), rgba(24,28,37,0.52));
-          --bg-top: linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0.04));
+          --bg-glass: rgba(27,31,40,0.75);
+          --bg-top: rgba(255,255,255,0.06);
           --bg-sub: rgba(255,255,255,0.08);
           --shadow: 0 10px 30px rgba(0,0,0,0.55);
           --text-main: #e5e7eb; --text-sub: #cbd5e1;
+          --btn-bg: #1f2937;
+          --btn-fg: #e5e7eb;
+          --btn-border: #4b5563;
         }
 
-        .olm-topbar{ display:flex; align-items:center; gap:10px; padding:10px 12px; background: var(--bg-top); border-bottom: 1px solid rgba(0,0,0,0.06); touch-action: none; }
+        .olm-topbar{
+          display:flex; flex-direction:column; gap:6px;
+          padding:10px 12px; background: var(--bg-top);
+          border-bottom: 1px solid rgba(0,0,0,0.06); touch-action: none;
+        }
         #olm-answers-container.olm-dark .olm-topbar{ border-bottom-color: rgba(255,255,255,0.06); }
+
+        .olm-header{ display:flex; align-items:center; gap:10px; }
         .olm-brand{ display:flex; align-items:center; gap:10px; }
-        .olm-logo{ width:32px; height:32px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-weight:700; background: linear-gradient(135deg,var(--accent),var(--accent-2)); color:#fff; }
-        .olm-title{ font-size:14px; font-weight:700; line-height:1; }
-        .olm-sub{ font-size:11px; color: var(--muted); }
-        .olm-controls{ margin-left:auto; display:flex; gap:6px; align-items:center; }
-        .olm-btn{ background: transparent; border: 1px solid rgba(11,17,26,0.08); padding:6px 8px; border-radius:8px; font-size:12px; }
-        #olm-answers-container.olm-dark .olm-btn{ border-color: rgba(255,255,255,0.12); color: var(--text-main); }
+        .olm-logo{
+          width:28px; height:28px; border-radius:6px; overflow:hidden; flex:0 0 auto;
+          background:#eee;
+        }
+        .olm-logo img{ width:100%; height:100%; object-fit:cover; display:block; }
+        .olm-title-line{ display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
+        .olm-title-line .tt-strong{ font-size:14px; font-weight:800; }
+        .olm-title-line .tt-sub{ font-size:12px; color: var(--muted); }
+
+        /* Hàng nút tách riêng, kéo ngang được trên mobile */
+        .olm-controls-row{
+          display:flex; gap:8px; align-items:center;
+          overflow-x:auto; -webkit-overflow-scrolling: touch; padding-top:2px;
+        }
+
+        /* Nút thường, namespace .olm-btn để không dính web */
+        #olm-answers-container .olm-btn{
+          appearance: button;
+          border: 1px solid var(--btn-border);
+          border-radius: 8px;
+          padding: 6px 10px;
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1;
+          display:inline-flex; align-items:center; gap:6px;
+          cursor:pointer;
+          background: var(--btn-bg);
+          color: var(--btn-fg);
+          white-space: nowrap;
+          user-select:none;
+        }
+        #olm-answers-container .olm-btn svg{ fill: currentColor; }
+        #olm-answers-container .olm-btn:active{ transform: translateY(1px); }
+        #olm-answers-container .olm-btn.is-ghost{
+          background: transparent;
+          color: var(--text-main);
+          border-color: var(--btn-border);
+        }
+        #olm-answers-container.olm-dark .olm-btn.is-ghost{ color: var(--text-main); }
 
         .search-wrap{ display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid rgba(0,0,0,0.06); background: var(--bg-sub); }
         #olm-answers-container.olm-dark .search-wrap{ border-bottom-color: rgba(255,255,255,0.06); }
-        .search-input{ flex:1; padding:8px 10px; border-radius:10px; border:1px solid rgba(0,0,0,0.06); outline:none; background: rgba(255,255,255,0.85); font-size:13px; }
+        .search-input{ flex:1; padding:8px 10px; border-radius:10px; border:1px solid rgba(0,0,0,0.06); outline:none; background: rgba(255,255,255,0.85); font-size:13px; color:#111827; }
         #olm-answers-container.olm-dark .search-input{ background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); color: var(--text-main); }
         .meta{ font-size:12px; color: var(--muted); min-width:74px; text-align:right; }
 
         #olm-answers-content{ padding:10px; overflow-y:auto; -webkit-overflow-scrolling: touch; flex:1; display:flex; flex-direction:column; gap:10px; }
-        .qa-block{ display:flex; flex-direction:column; gap:8px; padding:12px; border-radius:10px; background: linear-gradient(180deg, rgba(255,255,255,0.88), rgba(248,250,255,0.8)); border:1px solid rgba(15,23,42,0.05); }
-        #olm-answers-container.olm-dark .qa-block{ background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.04)); border-color: rgba(255,255,255,0.08); }
+        .qa-block{ display:flex; flex-direction:column; gap:8px; padding:12px; border-radius:10px; background: #ffffffdd; border:1px solid rgba(15,23,42,0.05); page-break-inside: avoid; break-inside: avoid; }
+        #olm-answers-container.olm-dark .qa-block{ background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.08); }
 
         .qa-top{ display:flex; align-items:flex-start; gap:10px; }
         .question-content{ font-weight:700; color:var(--text-main); font-size:14px; flex:1; }
         .q-index{ margin-right:6px; color: var(--text-sub); }
-        .qa-actions{ display:flex; gap:6px; align-items:center; margin-left:auto; flex-wrap: wrap; }
-        .pill{ font-size:11px; padding:3px 7px; border-radius:999px; color:#fff; background:#64748b; }
-        .pill.ok{ background: var(--success); }
-        .pill.sol{ background: #3b82f6; }
         .content-container{ padding-left:6px; color:#0b3c49; font-size:13px; }
         #olm-answers-container.olm-dark .content-container{ color: var(--text-main); }
         .content-container[data-type="answer"]{ font-weight:600; }
-        .content-container[data-type="answer"] .correct-answer{ color: var(--success) !important; }
+        .content-container[data-type="answer"] .correct-answer{ color: #10b981 !important; }
+
         .footer-bar{ padding:8px 10px; display:flex; align-items:center; gap:8px; border-top:1px solid rgba(0,0,0,0.06); background: var(--bg-sub); }
         #olm-answers-container.olm-dark .footer-bar{ border-top-color: rgba(255,255,255,0.08); }
-        #export-btn{ padding:8px 12px; border-radius:10px; border:1px solid rgba(11,17,26,0.08); cursor:pointer; font-weight:700; background:linear-gradient(90deg,var(--accent),var(--accent-2)); color:#fff; }
         #count-badge{ font-weight:700; color:var(--muted); margin-left:auto; font-size:13px; }
-        .copy-btn,.copy-q,.toggle-one{ border:none; border-radius:8px; padding:6px 8px; font-size:12px; }
-        .copy-btn{ background: var(--success); color:#fff; }
-        .copy-q{ background:#94a3b8; color:#fff; }
-        .toggle-one{ background: transparent; border:1px dashed rgba(11,17,26,0.2); color: var(--text-main); }
-        #olm-answers-container.olm-dark .toggle-one{ border-color: rgba(255,255,255,0.2); }
-        .not-found{ color: var(--muted); font-style: italic; }
 
-        .resize-handle{
-          position:absolute; right:8px; bottom:8px; width:18px; height:18px; cursor: nwse-resize;
-          border-right:2px solid rgba(0,0,0,0.25); border-bottom:2px solid rgba(0,0,0,0.25); opacity:.7; touch-action: none;
-        }
+        .resize-handle{ position:absolute; right:8px; bottom:8px; width:18px; height:18px; cursor: nwse-resize;
+          border-right:2px solid rgba(0,0,0,0.25); border-bottom:2px solid rgba(0,0,0,0.25); opacity:.7; touch-action: none; }
         #olm-answers-container.olm-dark .resize-handle{ border-right-color: rgba(255,255,255,0.35); border-bottom-color: rgba(255,255,255,0.35); }
         #olm-answers-container.resizing{ user-select:none; }
 
@@ -246,8 +278,9 @@
 
         @media (max-width: 520px){
           #olm-answers-container{ left: 12px !important; right: 12px !important; width: auto !important; height: 66vh !important; }
-          .olm-controls .olm-btn{ padding:5px 6px; font-size:11px; }
           .question-content{ font-size:13px; }
+          .olm-controls-row{ gap:6px; }
+          #olm-answers-container .olm-btn{ padding:6px 8px; font-size:12px; }
         }
 
         /* Floating toggle */
@@ -256,16 +289,21 @@
           width: 40px; height: 40px; border-radius: 999px; display:none; align-items:center; justify-content:center;
           z-index: 2147483647; border: 1px solid var(--glass-border);
           -webkit-backdrop-filter: blur(10px) saturate(120%); backdrop-filter: blur(10px) saturate(120%);
-          background: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(240,245,255,0.8));
+          background: #ffffffee;
           box-shadow: var(--shadow); cursor: pointer; user-select: none; font-weight:800; font-size:12px; color:#111827;
           touch-action: manipulation;
         }
         #olm-answers-container.olm-dark ~ #olm-toggle-btn{
           border-color: rgba(255,255,255,0.12);
-          background: linear-gradient(135deg, rgba(40,44,52,0.9), rgba(40,44,52,0.8)); color:#e5e7eb;
+          background: rgba(40,44,52,0.9); color:#e5e7eb;
         }
         #olm-toggle-btn.show{ display:flex; }
         #olm-toggle-btn:active{ transform: scale(.98); }
+
+        /* PDF helpers */
+        .pdf-root{ width: 900px; max-width: 100%; margin: 0 auto; }
+        .pdf-spacer{ height: 32px; }
+        mjx-container{ page-break-inside: avoid; break-inside: avoid; }
       `;
       const style = document.createElement("style");
       style.textContent = css;
@@ -278,43 +316,70 @@
       this.container.style.width = this.size.w + "px";
       this.container.style.height = this.size.h + "px";
 
-      // Topbar (drag handle by pointer events)
+      // Topbar (2 hàng: tiêu đề trên, nút dưới)
       const topbar = document.createElement("div");
       topbar.className = "olm-topbar";
       topbar.addEventListener("pointerdown", this.onPointerDownDrag);
 
+      // Header line
+      const header = document.createElement("div");
+      header.className = "olm-header";
+
       const brand = document.createElement("div");
       brand.className = "olm-brand";
-      const logo = document.createElement("div"); logo.className = "olm-logo"; logo.textContent = "OLM";
-      const titleWrap = document.createElement("div");
-      const title = document.createElement("div"); title.className = "olm-title"; title.textContent = "OLM Helper";
-      const sub = document.createElement("div"); sub.className = "olm-sub"; sub.textContent = "Edit by Đòn Hư Lém";
-      titleWrap.appendChild(title); titleWrap.appendChild(sub);
-      brand.appendChild(logo); brand.appendChild(titleWrap);
 
-      const controls = document.createElement("div"); controls.className = "olm-controls";
+      const logo = document.createElement("div");
+      logo.className = "olm-logo";
+      const logoImg = document.createElement("img");
+      logoImg.src = "https://play-lh.googleusercontent.com/PMA5MRr5DUJBUbDgdUn6arbGXteDjRBIZVO3P3z9154Kud2slXPjy-iiPwwKfvZhc4o=w240-h480-rw";
+      logoImg.alt = "OLM logo";
+      logo.appendChild(logoImg);
 
-      const pinBtn = document.createElement("button");
-      pinBtn.className = "olm-btn"; pinBtn.title = "Ghim trái/phải (Alt G)";
-      pinBtn.textContent = this.pinSide === "right" ? "R" : this.pinSide === "left" ? "R" : "L/R";
-      pinBtn.addEventListener("click", () => this.togglePinSide());
+      const titleLine = document.createElement("div");
+      titleLine.className = "olm-title-line";
+      const ttStrong = document.createElement("span");
+      ttStrong.className = "tt-strong";
+      ttStrong.textContent = "OLM Helper";
+      const ttSub = document.createElement("span");
+      ttSub.className = "tt-sub";
+      ttSub.textContent = "by Đòn Hư Lém";
+      titleLine.append(ttStrong, ttSub);
 
+      brand.append(logo, titleLine);
+
+      header.append(brand);
+
+      // Controls row (ở hàng riêng)
+      const controlsRow = document.createElement("div");
+      controlsRow.className = "olm-controls-row";
+
+      // Nút dark/light: chỉ icon mặt trăng
       const darkBtn = document.createElement("button");
-      darkBtn.className = "olm-btn"; darkBtn.title = "Dark mode (Alt D)";
-      darkBtn.textContent = this.dark ? "D/L" : "D/L";
+      darkBtn.className = "olm-btn is-ghost"; darkBtn.title = "Dark mode (Alt D)"; darkBtn.setAttribute("aria-label","Toggle dark mode");
+      darkBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>`;
       darkBtn.addEventListener("click", () => this.toggleDarkMode());
 
+      // Nút ẩn/hiện: "Hide"
       const collapseBtn = document.createElement("button");
-      collapseBtn.className = "olm-btn"; collapseBtn.title = "Ẩn/Hiện (Shift phải)";
+      collapseBtn.className = "olm-btn is-ghost"; collapseBtn.title = "Ẩn/Hiện (Shift phải)";
       collapseBtn.textContent = "Hide";
       collapseBtn.addEventListener("click", () => this.toggleVisibility());
 
-      const exportBtnTop = document.createElement("button");
-      exportBtnTop.id = "export-btn"; exportBtnTop.textContent = "Xuất TXT";
-      exportBtnTop.addEventListener("click", () => this.exportToTxt());
+      // TXT
+      const exportTxtBtn = document.createElement("button");
+      exportTxtBtn.id = "export-btn"; exportTxtBtn.className = "olm-btn";
+      exportTxtBtn.textContent = "TXT";
+      exportTxtBtn.addEventListener("click", () => this.exportToTxt());
 
-      controls.append(pinBtn, darkBtn, collapseBtn, exportBtnTop);
-      topbar.append(brand, controls);
+      // PDF
+      const exportPdfBtn = document.createElement("button");
+      exportPdfBtn.id = "export-pdf-btn"; exportPdfBtn.className = "olm-btn";
+      exportPdfBtn.textContent = "PDF";
+      exportPdfBtn.addEventListener("click", () => this.exportToPDF());
+
+      controlsRow.append(darkBtn, collapseBtn, exportTxtBtn, exportPdfBtn);
+
+      topbar.append(header, controlsRow);
 
       // Search
       const searchWrap = document.createElement("div"); searchWrap.className = "search-wrap";
@@ -335,7 +400,7 @@
       const countBadge = document.createElement("div"); countBadge.id = "count-badge"; countBadge.textContent = "0 câu";
       footer.append(hint, countBadge);
 
-      // Resize handle by pointer
+      // Resize handle
       const handle = document.createElement("div");
       handle.className = "resize-handle"; handle.title = "Kéo để đổi kích thước";
       handle.addEventListener("pointerdown", this.onPointerDownResize);
@@ -348,14 +413,12 @@
       this.searchInput = searchInput;
       this.countBadge = countBadge;
       this.metaInfo = meta;
-      this.pinBtn = pinBtn;
       this.darkBtn = darkBtn;
 
-      // Toggle floating button
+      // Floating toggle
       const tbtn = document.createElement("div");
       tbtn.id = "olm-toggle-btn"; tbtn.title = "Hiện OLM Helper"; tbtn.textContent = "OLM";
       tbtn.addEventListener("click", () => { this.isVisible = true; this.container.classList.remove("hidden"); this.hideToggleBtn(); });
-      // Double-tap to hide quickly on mobile
       let lastTap = 0;
       tbtn.addEventListener("touchend", () => {
         const now = Date.now();
@@ -367,22 +430,18 @@
     }
 
     addEventListeners() {
-      // Keyboard shortcuts (PC). Mobile sẽ bỏ qua nếu không có phím.
       window.addEventListener("keydown", this.onKeyDown);
       window.addEventListener("resize", () => this.positionToggleBtn());
       window.addEventListener("scroll", () => this.positionToggleBtn(), { passive: true });
     }
 
-    // Pointer drag (mouse + touch + pen)
+    // Drag & resize
     onPointerDownDrag(e) {
       if (e.button !== 0 && e.pointerType === "mouse") return;
-      // Khi kéo, chuyển sang free
-      this.pinSide = "free";
-      localStorage.setItem(LS_PIN, this.pinSide);
       const rect = this.container.getBoundingClientRect();
       this.container.style.right = "auto";
-      this.container.style.left = `${rect.left}px`;
-      this.container.style.top  = `${rect.top}px`;
+      this.container.style.left  = `${rect.left}px`;
+      this.container.style.top   = `${rect.top}px`;
       this.container.style.width  = rect.width + "px";
       this.container.style.height = rect.height + "px";
 
@@ -398,7 +457,6 @@
       const dy = e.clientY - this.dragState.startY;
       let left = this.dragState.initX + dx;
       let top  = this.dragState.initY + dy;
-      // chặn ra ngoài màn
       const rect = this.container.getBoundingClientRect();
       const maxL = window.innerWidth - rect.width - 6;
       const maxT = window.innerHeight - rect.height - 6;
@@ -416,12 +474,10 @@
       const rect = this.container.getBoundingClientRect();
       this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
       try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
-      try { localStorage.setItem(LS_POS, JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) })); } catch {}
+      try { localStorage.setItem(LS_POS,  JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) })); } catch {}
       this.pos = { left: Math.round(rect.left), top: Math.round(rect.top) };
       this.positionToggleBtn();
     }
-
-    // Pointer resize
     onPointerDownResize(e){
       if (e.button !== 0 && e.pointerType === "mouse") return;
       e.preventDefault();
@@ -440,7 +496,7 @@
       let newH = this.resizeState.startH + (e.clientY - this.resizeState.startY);
       newW = Math.max(minW, Math.min(maxW, newW));
       newH = Math.max(minH, Math.min(maxH, newH));
-      this.container.style.width = newW + 'px';
+      this.container.style.width  = newW + 'px';
       this.container.style.height = newH + 'px';
       this.positionToggleBtn();
     }
@@ -456,32 +512,164 @@
       this.positionToggleBtn();
     }
 
+    // Exporters
     exportToTxt() {
-      let fullText = `Đáp án OLM by Đòn Hư Lém - ${new Date().toLocaleString("vi-VN")}\n\n`;
-      const blocks = [...this.contentArea.querySelectorAll(".qa-block")].filter(b => b.style.display !== "none");
-      blocks.forEach((block, index) => {
+      let fullText = "";
+      const blocks = [...this.contentArea.querySelectorAll(".qa-block")]
+        .filter(b => b.style.display !== "none");
+
+      blocks.forEach((block) => {
         const q = block.querySelector(".question-content");
         const content = block.querySelector(".content-container");
         if (!q || !content) return;
         const textQ = q.textContent.trim().replace(/\s\s+/g, " ");
         const textA = content.textContent.trim().replace(/\s\s+/g, " ");
-        fullText += `Câu ${index + 1}: ${textQ}\n--> ${textA}\n\n`;
+        fullText += `${textQ}\n--> ${textA}\n\n`;
       });
+
       const blob = new Blob([fullText], { type: "text/plain;charset=utf-8" });
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
       link.download = `dap-an-olm-${Date.now()}.txt`;
-      ensureBody(link); link.click(); link.remove();
+      ensureBody(link);
+      link.click();
+      link.remove();
+    }
+
+    // GIỮ NGUYÊN HÀM XUẤT PDF (không chỉnh sửa để tránh ảnh hưởng nội dung file)
+    async exportToPDF() {
+      try {
+        const visibleBlocks = [...this.contentArea.querySelectorAll(".qa-block")]
+          .filter(b => b.style.display !== "none");
+        if (!visibleBlocks.length) { alert("Không có nội dung để xuất."); return; }
+
+        const root = document.createElement("div");
+        root.className = "pdf-root";
+
+        // Title yêu cầu
+        const header = document.createElement("div");
+        header.style.cssText = "font-weight:700;font-size:18px;margin-bottom:6px;text-align:center";
+        header.textContent = "Đòn Hư Lém - PDF";
+        const time = document.createElement("div");
+        time.style.cssText = "font-family:monospace;font-size:12px;color:#64748b;text-align:center;margin-bottom:12px";
+        time.textContent = new Date().toLocaleString("vi-VN");
+        root.append(header, time);
+
+        visibleBlocks.forEach(b => {
+          const clone = b.cloneNode(true);
+          clone.querySelectorAll("mjx-container").forEach(m => {
+            m.style.pageBreakInside = "avoid"; m.style.breakInside = "avoid";
+          });
+          clone.querySelectorAll("img").forEach(img => {
+            try { img.src = new URL(img.getAttribute("src"), location.href).href; } catch {}
+            img.style.maxWidth = "100%"; img.style.height = "auto";
+          });
+          root.appendChild(clone);
+        });
+
+        // Spacer chống “cụt” trang
+        const spacer = document.createElement("div");
+        spacer.className = "pdf-spacer";
+        root.appendChild(spacer);
+
+        // Typeset clone
+        await this.typesetForExport(root);
+        await this.waitImages(root);
+        await ensureHtml2Pdf();
+
+        const opt = {
+          margin: [10, 10, 12, 10],
+          filename: `olm-${Date.now()}.pdf`,
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: {
+            scale: 2,
+            useCORS: true,
+            letterRendering: true,
+            windowWidth: Math.max(document.documentElement.clientWidth, root.scrollWidth),
+            windowHeight: root.scrollHeight + 200,
+            scrollY: 0
+          },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+          pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
+        };
+
+        const stash = document.createElement("div");
+        stash.style.cssText = "position:fixed;left:-99999px;top:-99999px;width:900px;opacity:0;pointer-events:none";
+        stash.appendChild(root);
+        ensureBody(stash);
+
+        await new Promise(r => setTimeout(r, 60));
+
+        await UW.html2pdf().set(opt).from(root).save();
+
+        stash.remove();
+      } catch (err) {
+        console.error("Xuất PDF lỗi:", err);
+        try {
+          const w = window.open("", "_blank");
+          if (!w) throw new Error("Popup bị chặn");
+          w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Đòn Hư Lém - PDF</title>
+            <style>
+              body{ font-family: Arial, Helvetica, sans-serif; padding: 16px; }
+              .qa-block{ page-break-inside: avoid; break-inside: avoid; border:1px solid #ddd; border-radius:10px; padding:12px; margin-bottom:10px; }
+              mjx-container{ page-break-inside: avoid; break-inside: avoid; }
+              img{ max-width:100%; height:auto; }
+              .pdf-spacer{ height: 24px; }
+              h1{ font-size:18px; text-align:center; margin:0 0 6px; }
+              .time{ font: 12px/1 monospace; color:#64748b; text-align:center; margin-bottom:12px; }
+            </style>
+          </head><body>
+            <h1>Đòn Hư Lém - PDF</h1>
+            <div class="time">${new Date().toLocaleString("vi-VN")}</div>
+          </body></html>`);
+          const body = w.document.body;
+          const blocks = [...this.contentArea.querySelectorAll(".qa-block")].filter(b => b.style.display !== "none");
+          blocks.forEach(b => body.appendChild(b.cloneNode(true)));
+          body.appendChild(Object.assign(document.createElement("div"), { className: "pdf-spacer" }));
+          const cfg = w.document.createElement("script");
+          cfg.type = "text/javascript";
+          cfg.text = `window.MathJax = { tex: { inlineMath: [['$', '$'], ['\\\\(', '\\\\)']], displayMath: [['$$','$$'], ['\\\\[','\\\\]']] }, startup: { typeset: true } };`;
+          const mj = w.document.createElement("script");
+          mj.src = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js";
+          body.appendChild(cfg); body.appendChild(mj);
+          mj.onload = () => setTimeout(() => { w.print(); }, 600);
+        } catch {
+          alert("Xuất PDF thất bại. Thử lại lần nữa giúp mình nhé!");
+        }
+      }
+    }
+
+    async typesetForExport(root) {
+      if (UW.MathJax?.typesetPromise) {
+        const box = document.createElement("div");
+        box.style.cssText = "position:fixed;left:-99999px;top:-99999px;width:900px;opacity:0;pointer-events:none";
+        box.appendChild(root);
+        ensureBody(box);
+        try { await UW.MathJax.typesetPromise([box]); } catch {}
+        document.body.appendChild(root);
+        box.remove();
+        await new Promise(r => setTimeout(r, 30));
+      }
+    }
+
+    waitImages(root) {
+      const imgs = [...root.querySelectorAll("img")];
+      if (!imgs.length) return Promise.resolve();
+      return Promise.allSettled(imgs.map(img => new Promise(res => {
+        if (img.complete && img.naturalWidth) return res();
+        img.addEventListener("load", () => res(), { once: true });
+        img.addEventListener("error", () => res(), { once: true });
+      })));
     }
 
     copyAllVisibleAnswers() {
       const blocks = [...this.contentArea.querySelectorAll(".qa-block")].filter(b => b.style.display !== "none");
       if (!blocks.length) return;
       let out = "";
-      blocks.forEach((b, i) => {
+      blocks.forEach((b) => {
         const q = b.querySelector(".question-content")?.innerText ?? "";
         const a = b.querySelector(".content-container")?.innerText ?? "";
-        out += `Câu ${i + 1}: ${q}\n--> ${a}\n\n`;
+        out += `${q}\n--> ${a}\n\n`;
       });
       const doCopy = (txt) => navigator.clipboard?.writeText(txt).catch(() => {
         const ta = document.createElement("textarea"); ta.value = txt; ensureBody(ta); ta.select(); document.execCommand("copy"); ta.remove();
@@ -496,7 +684,6 @@
         if (k === "f") { event.preventDefault(); this.searchInput.focus(); this.searchInput.select(); }
         else if (k === "a") { event.preventDefault(); this.copyAllVisibleAnswers(); }
         else if (k === "d") { event.preventDefault(); this.toggleDarkMode(); }
-        else if (k === "g") { event.preventDefault(); this.togglePinSide(); }
       }
     }
 
@@ -509,26 +696,14 @@
     toggleDarkMode() {
       this.dark = !this.dark;
       this.container.classList.toggle("olm-dark", this.dark);
-      this.darkBtn.textContent = this.dark ? "Dark: On" : "Dark: Off";
       try { localStorage.setItem(LS_DARK, this.dark ? "1" : "0"); } catch {}
     }
 
-    togglePinSide() {
-      if (this.pinSide === "right") this.pinSide = "left";
-      else if (this.pinSide === "left") this.pinSide = "free";
-      else this.pinSide = "right";
-      localStorage.setItem(LS_PIN, this.pinSide);
-      this.pinBtn.textContent = this.pinSide === "right" ? "Ghim phải" : this.pinSide === "left" ? "Ghim trái" : "Thả tự do";
-      this.applyPinOrPos();
-    }
-
-    applyPinOrPos() {
+    applyPosOnly() {
       const c = this.container; c.style.left = ""; c.style.right = ""; c.style.top = "";
-      if (this.pos && this.pinSide === "free") {
+      if (this.pos) {
         c.style.left = this.pos.left + "px";
-        c.style.top = this.pos.top + "px";
-      } else if (this.pinSide === "left") {
-        c.style.left = "12px"; c.style.right = "auto"; c.style.top = "12px";
+        c.style.top  = this.pos.top  + "px";
       } else {
         c.style.right = "12px"; c.style.left = "auto"; c.style.top = "12px";
       }
@@ -540,26 +715,15 @@
       let topPx = 12;
       try {
         const rect = this.container.getBoundingClientRect();
-        if (rect && Number.isFinite(rect.top)) {
-          topPx = Math.max(12, Math.min(window.innerHeight - 52, rect.top));
-        }
+        if (rect && Number.isFinite(rect.top)) topPx = Math.max(12, Math.min(window.innerHeight - 52, rect.top));
       } catch {}
       this.toggleBtn.style.top = topPx + "px";
-      if (this.pinSide === "left") { this.toggleBtn.style.left = "12px"; this.toggleBtn.style.right = "auto"; }
-      else if (this.pinSide === "right") { this.toggleBtn.style.right = "12px"; this.toggleBtn.style.left = "auto"; }
-      else {
-        try {
-          const rect = this.container.getBoundingClientRect();
-          const stickRight = rect.left > window.innerWidth / 2;
-          if (stickRight) { this.toggleBtn.style.right = "12px"; this.toggleBtn.style.left = "auto"; }
-          else { this.toggleBtn.style.left = "12px"; this.toggleBtn.style.right = "auto"; }
-        } catch { this.toggleBtn.style.right = "12px"; this.toggleBtn.style.left = "auto"; }
-      }
+      this.toggleBtn.style.right = "12px";
+      this.toggleBtn.style.left = "auto";
     }
     showToggleBtn(){ this.toggleBtn?.classList.add("show"); this.positionToggleBtn(); }
     hideToggleBtn(){ this.toggleBtn?.classList.remove("show"); }
 
-    // ==== render ====
     renderContentWithMath(element) {
       const tryRender = () => {
         try {
@@ -599,7 +763,6 @@
           }
         } catch (e) { console.error("Lỗi phân tích JSON:", e); }
       }
-      // HTML cũ
       const tempDiv = document.createElement("div");
       tempDiv.innerHTML = decodeBase64Utf8(question.content || "");
       const correctAnswers = tempDiv.querySelectorAll(".correctAnswer");
@@ -631,6 +794,7 @@
 
     renderData(data) {
       if (!Array.isArray(data)) return;
+
       const responseContainer = document.createElement("div");
       const timestamp = new Date().toLocaleTimeString();
       responseContainer.innerHTML = `<p style="font-family:monospace;font-size:12px;background:rgba(0,0,0,0.06);padding:6px;border-radius:6px;"><b>Time:</b> ${timestamp}</p>`;
@@ -654,40 +818,16 @@
         const indexSpan = document.createElement("span"); indexSpan.className = "q-index"; indexSpan.textContent = "Câu ?. ";
         questionDisplayContainer.appendChild(indexSpan);
         while (tempDiv.firstChild) questionDisplayContainer.appendChild(tempDiv.firstChild);
-        if (!questionDisplayContainer.hasChildNodes() && question.title) questionDisplayContainer.innerHTML = `<span class="q-index">Câu ?. </span>${question.title}`;
+        if (!questionDisplayContainer.hasChildNodes() && question.title) {
+          questionDisplayContainer.innerHTML = `<span class="q-index">Câu ?. </span>${question.title}`;
+        }
 
-        const actions = document.createElement("div"); actions.className = "qa-actions";
-        const pill = document.createElement("div"); pill.className = "pill"; pill.textContent = answersElement ? "Đ" : solutionElement ? "L" : "?";
-        if (answersElement) pill.classList.add("ok"); else if (solutionElement) pill.classList.add("sol");
-
-        const toggleOne = document.createElement("button"); toggleOne.className = "toggle-one"; toggleOne.textContent = "Thu gọn";
-        toggleOne.addEventListener("click", () => {
-          contentContainer.style.display = contentContainer.style.display === "none" ? "" : "none";
-          toggleOne.textContent = contentContainer.style.display === "none" ? "Mở rộng" : "Thu gọn";
-          if (contentContainer.style.display !== "none") this.renderContentWithMath(contentContainer);
-        });
-
-        const copyAns = document.createElement("button"); copyAns.className = "copy-btn"; copyAns.textContent = "Copy đáp án"; copyAns.title = "Copy đáp án / lời giải";
-        copyAns.addEventListener("click", () => {
-          const txt = (contentContainer ? contentContainer.innerText : "").trim(); if (!txt) return;
-          const doCopy = () => navigator.clipboard?.writeText(txt).then(() => { copyAns.textContent = "Copied"; setTimeout(() => (copyAns.textContent = "Copy đáp án"), 900); })
-          .catch(() => { const ta = document.createElement("textarea"); ta.value = txt; ensureBody(ta); ta.select(); try { document.execCommand("copy"); copyAns.textContent = "Copied"; } catch(e) {} ta.remove(); setTimeout(() => (copyAns.textContent = "Copy đáp án"), 900); });
-          doCopy();
-        });
-
-        const copyQ = document.createElement("button"); copyQ.className = "copy-q"; copyQ.textContent = "Copy câu hỏi";
-        copyQ.addEventListener("click", () => {
-          const txt = (questionDisplayContainer?.innerText || "").trim(); if (!txt) return;
-          navigator.clipboard?.writeText(txt).catch(() => { const ta = document.createElement("textarea"); ta.value = txt; ensureBody(ta); ta.select(); document.execCommand("copy"); ta.remove(); });
-        });
-
-        actions.append(pill, toggleOne, copyQ, copyAns);
-        qaTop.append(questionDisplayContainer, actions);
+        qaTop.append(questionDisplayContainer);
 
         const contentContainer = document.createElement("div"); contentContainer.className = "content-container";
         if (answersElement) { contentContainer.dataset.type = "answer"; contentContainer.appendChild(answersElement); }
         else if (solutionElement) { contentContainer.dataset.type = "solution"; contentContainer.appendChild(solutionElement); }
-        else { contentContainer.dataset.type = "not-found"; const nf = document.createElement("div"); nf.className = "not-found"; nf.textContent = "Không tìm thấy đáp án hay lời giải."; contentContainer.appendChild(nf); }
+        else { contentContainer.dataset.type = "not-found"; const nf = document.createElement("div"); nf.style.cssText="color:#6b7280;font-style:italic"; nf.textContent = "Không tìm thấy đáp án hay lời giải."; contentContainer.appendChild(nf); }
 
         questionDiv.append(qaTop, contentContainer);
         responseContainer.appendChild(questionDiv);
@@ -732,8 +872,8 @@
   const answerUI = new AnswerDisplay();
   answerUI.init();
 
-  // ===== Network hooks (robust for mobile) =====
-  const originalFetch = UW.fetch.bind(UW);
+  // Network hooks
+  const originalFetch = UW.fetch?.bind(UW) || fetch.bind(window);
   UW.fetch = function (...args) {
     const requestUrl = args[0] instanceof Request ? args[0].url : args[0];
     const p = originalFetch(...args);
@@ -749,19 +889,21 @@
     return p;
   };
 
-  const origOpen = UW.XMLHttpRequest.prototype.open;
-  const origSend = UW.XMLHttpRequest.prototype.send;
-  UW.XMLHttpRequest.prototype.open = function (...args) {
-    this._olm_url = args[1] || ""; return origOpen.apply(this, args);
-  };
-  UW.XMLHttpRequest.prototype.send = function (...args) {
-    this.addEventListener("load", () => {
-      try {
-        if ((this._olm_url || this.responseURL || "").includes(TARGET_URL_KEYWORD) && this.status === 200) {
-          try { const data = JSON.parse(this.responseText); answerUI.renderData(data); } catch (e) { console.error(e); }
-        }
-      } catch (e) {}
-    });
-    return origSend.apply(this, args);
-  };
+  if (UW.XMLHttpRequest) {
+    const origOpen = UW.XMLHttpRequest.prototype.open;
+    const origSend = UW.XMLHttpRequest.prototype.send;
+    UW.XMLHttpRequest.prototype.open = function (...args) {
+      this._olm_url = args[1] || ""; return origOpen.apply(this, args);
+    };
+    UW.XMLHttpRequest.prototype.send = function (...args) {
+      this.addEventListener("load", () => {
+        try {
+          if ((this._olm_url || this.responseURL || "").includes(TARGET_URL_KEYWORD) && this.status === 200) {
+            try { const data = JSON.parse(this.responseText); answerUI.renderData(data); } catch (e) { console.error(e); }
+          }
+        } catch (e) {}
+      });
+      return origSend.apply(this, args);
+    };
+  }
 })();
