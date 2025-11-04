@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OLM Helper V2
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @description  Panel đáp án/solution hiển thị tốt trên PC & điện thoại.
 // @author       Đòn Hư Lém
 // @match        https://olm.vn/chu-de/*
@@ -15,11 +15,14 @@
 (function () {
   "use strict";
 
+  const TOGGLE_ICON_URL = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTMdM9MEQ0ExL1PmInT3U5I8v63YXBEdoIT0Q&s";
+
   const UW = (typeof unsafeWindow !== "undefined" && unsafeWindow) ? unsafeWindow : window;
   const TARGET_URL_KEYWORD = "get-question-of-ids";
   const LS_SIZE = "olm_size";
   const LS_POS  = "olm_pos";
   const LS_DARK = "olm_dark";
+  const LS_TOGGLE_POS = "olm_toggle_pos";
   const HIGHLIGHT_CLASS = "olm-hl";
 
   const ready = (fn) => {
@@ -115,12 +118,20 @@
   class AnswerDisplay {
     constructor() {
       this.isVisible = true;
+
       this.dragState = { dragging: false, startX: 0, startY: 0, initX: 0, initY: 0 };
       this.resizeState = null;
 
       const defaultH = Math.max(340, Math.round(window.innerHeight * 0.66));
       this.size = { w: Math.min(520, Math.max(340, Math.round(window.innerWidth * 0.9))), h: defaultH };
       this.pos = null;
+
+      this.toggleDrag = { dragging: false, startX: 0, startY: 0, initL: 0, initT: 0 };
+      this.togglePos = (() => {
+        try { const p = JSON.parse(localStorage.getItem(LS_TOGGLE_POS) || "null"); if (Number.isFinite(p?.left) && Number.isFinite(p?.top)) return p; } catch {}
+        return null;
+      })();
+
       this.dark = (() => {
         const saved = localStorage.getItem(LS_DARK);
         if (saved !== null) return saved === "1";
@@ -139,6 +150,11 @@
       this.onPointerDownResize = this.onPointerDownResize.bind(this);
       this.onPointerMoveResize = this.onPointerMoveResize.bind(this);
       this.onPointerUpResize   = this.onPointerUpResize.bind(this);
+
+      // Drag nút toggle
+      this.onPointerDownToggle = this.onPointerDownToggle.bind(this);
+      this.onPointerMoveToggle = this.onPointerMoveToggle.bind(this);
+      this.onPointerUpToggle   = this.onPointerUpToggle.bind(this);
     }
 
     init() {
@@ -147,7 +163,7 @@
       this.addEventListeners();
       if (this.dark) this.container.classList.add("olm-dark");
       this.applyPosOnly();
-      this.positionToggleBtn();
+      this.applyTogglePos();  // đặt vị trí nút nổi nếu có
     }
 
     injectCSS() {
@@ -216,13 +232,12 @@
         .olm-title-line .tt-strong{ font-size:14px; font-weight:800; }
         .olm-title-line .tt-sub{ font-size:12px; color: var(--muted); }
 
-        /* Hàng nút tách riêng, kéo ngang được trên mobile */
         .olm-controls-row{
           display:flex; gap:8px; align-items:center;
           overflow-x:auto; -webkit-overflow-scrolling: touch; padding-top:2px;
         }
 
-        /* Nút thường, namespace .olm-btn để không dính web */
+        /* Nút riêng namespace #olm-answers-container để không ảnh hưởng web */
         #olm-answers-container .olm-btn{
           appearance: button;
           border: 1px solid var(--btn-border);
@@ -283,22 +298,31 @@
           #olm-answers-container .olm-btn{ padding:6px 8px; font-size:12px; }
         }
 
-        /* Floating toggle */
+        /* Floating toggle - draggable + img icon */
         #olm-toggle-btn{
-          position: fixed; top: max(12px, env(safe-area-inset-top)); right: 12px;
-          width: 40px; height: 40px; border-radius: 999px; display:none; align-items:center; justify-content:center;
-          z-index: 2147483647; border: 1px solid var(--glass-border);
-          -webkit-backdrop-filter: blur(10px) saturate(120%); backdrop-filter: blur(10px) saturate(120%);
+          position: fixed;
+          top: max(12px, env(safe-area-inset-top));
+          right: 12px;
+          width: 46px; height: 46px;
+          border-radius: 999px;
+          display:none; align-items:center; justify-content:center;
+          z-index: 2147483647;
+          border: 1px solid rgba(0,0,0,0.12);
+          -webkit-backdrop-filter: blur(10px) saturate(120%);
+          backdrop-filter: blur(10px) saturate(120%);
           background: #ffffffee;
-          box-shadow: var(--shadow); cursor: pointer; user-select: none; font-weight:800; font-size:12px; color:#111827;
-          touch-action: manipulation;
+          box-shadow: 0 10px 24px rgba(17,24,39,0.18);
+          cursor: grab; user-select: none;
+          touch-action: none; /* để kéo mượt trên mobile */
         }
+        #olm-toggle-btn:active{ cursor: grabbing; transform: scale(.98); }
+        #olm-toggle-btn.show{ display:flex; }
+        #olm-toggle-btn img{ width: 70%; height: 70%; object-fit: cover; border-radius: 999px; pointer-events: none; }
+        /* Dark follow */
         #olm-answers-container.olm-dark ~ #olm-toggle-btn{
           border-color: rgba(255,255,255,0.12);
-          background: rgba(40,44,52,0.9); color:#e5e7eb;
+          background: rgba(40,44,52,0.92);
         }
-        #olm-toggle-btn.show{ display:flex; }
-        #olm-toggle-btn:active{ transform: scale(.98); }
 
         /* PDF helpers */
         .pdf-root{ width: 900px; max-width: 100%; margin: 0 auto; }
@@ -316,12 +340,12 @@
       this.container.style.width = this.size.w + "px";
       this.container.style.height = this.size.h + "px";
 
-      // Topbar (2 hàng: tiêu đề trên, nút dưới)
+      // Topbar
       const topbar = document.createElement("div");
       topbar.className = "olm-topbar";
       topbar.addEventListener("pointerdown", this.onPointerDownDrag);
 
-      // Header line
+      // Header
       const header = document.createElement("div");
       header.className = "olm-header";
 
@@ -346,39 +370,33 @@
       titleLine.append(ttStrong, ttSub);
 
       brand.append(logo, titleLine);
-
       header.append(brand);
 
-      // Controls row (ở hàng riêng)
+      // Controls
       const controlsRow = document.createElement("div");
       controlsRow.className = "olm-controls-row";
 
-      // Nút dark/light: chỉ icon mặt trăng
       const darkBtn = document.createElement("button");
       darkBtn.className = "olm-btn is-ghost"; darkBtn.title = "Dark mode (Alt D)"; darkBtn.setAttribute("aria-label","Toggle dark mode");
       darkBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>`;
       darkBtn.addEventListener("click", () => this.toggleDarkMode());
 
-      // Nút ẩn/hiện: "Hide"
       const collapseBtn = document.createElement("button");
       collapseBtn.className = "olm-btn is-ghost"; collapseBtn.title = "Ẩn/Hiện (Shift phải)";
       collapseBtn.textContent = "Hide";
       collapseBtn.addEventListener("click", () => this.toggleVisibility());
 
-      // TXT
       const exportTxtBtn = document.createElement("button");
       exportTxtBtn.id = "export-btn"; exportTxtBtn.className = "olm-btn";
       exportTxtBtn.textContent = "TXT";
       exportTxtBtn.addEventListener("click", () => this.exportToTxt());
 
-      // PDF
       const exportPdfBtn = document.createElement("button");
       exportPdfBtn.id = "export-pdf-btn"; exportPdfBtn.className = "olm-btn";
       exportPdfBtn.textContent = "PDF";
       exportPdfBtn.addEventListener("click", () => this.exportToPDF());
 
       controlsRow.append(darkBtn, collapseBtn, exportTxtBtn, exportPdfBtn);
-
       topbar.append(header, controlsRow);
 
       // Search
@@ -415,27 +433,35 @@
       this.metaInfo = meta;
       this.darkBtn = darkBtn;
 
-      // Floating toggle
+      // Floating toggle (draggable + icon img)
       const tbtn = document.createElement("div");
-      tbtn.id = "olm-toggle-btn"; tbtn.title = "Hiện OLM Helper"; tbtn.textContent = "OLM";
-      tbtn.addEventListener("click", () => { this.isVisible = true; this.container.classList.remove("hidden"); this.hideToggleBtn(); });
-      let lastTap = 0;
-      tbtn.addEventListener("touchend", () => {
-        const now = Date.now();
-        if (now - lastTap < 350) this.toggleVisibility();
-        lastTap = now;
-      }, { passive: true });
+      tbtn.id = "olm-toggle-btn"; tbtn.title = "Hiện OLM Helper";
+      const timg = document.createElement("img");
+      timg.alt = "Toggle OLM Helper";
+      timg.src = TOGGLE_ICON_URL;
+      tbtn.appendChild(timg);
+
+      // Click để hiện panel
+      tbtn.addEventListener("click", (e) => {
+        // Nếu vừa kéo thì bỏ click (để không bị bật panel khi thả tay)
+        if (tbtn.__dragging) return;
+        this.isVisible = true; this.container.classList.remove("hidden"); this.hideToggleBtn();
+      });
+
+      // Kéo nút (pointer events)
+      tbtn.addEventListener("pointerdown", this.onPointerDownToggle);
       ensureBody(tbtn);
       this.toggleBtn = tbtn;
     }
 
     addEventListeners() {
       window.addEventListener("keydown", this.onKeyDown);
-      window.addEventListener("resize", () => this.positionToggleBtn());
-      window.addEventListener("scroll", () => this.positionToggleBtn(), { passive: true });
+      // Không tự reposition nút theo container nữa. Nút có vị trí độc lập do người dùng kéo.
+      window.addEventListener("resize", () => this.boundToggleInside());
+      window.addEventListener("scroll", () => {}, { passive: true });
     }
 
-    // Drag & resize
+    /* ===== Drag & resize panel ===== */
     onPointerDownDrag(e) {
       if (e.button !== 0 && e.pointerType === "mouse") return;
       const rect = this.container.getBoundingClientRect();
@@ -464,7 +490,6 @@
       top  = Math.max(6, Math.min(maxT,  top));
       this.container.style.left = `${left}px`;
       this.container.style.top  = `${top}px`;
-      this.positionToggleBtn();
     }
     onPointerUpDrag() {
       this.dragState.dragging = false;
@@ -476,8 +501,8 @@
       try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
       try { localStorage.setItem(LS_POS,  JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) })); } catch {}
       this.pos = { left: Math.round(rect.left), top: Math.round(rect.top) };
-      this.positionToggleBtn();
     }
+
     onPointerDownResize(e){
       if (e.button !== 0 && e.pointerType === "mouse") return;
       e.preventDefault();
@@ -498,7 +523,6 @@
       newH = Math.max(minH, Math.min(maxH, newH));
       this.container.style.width  = newW + 'px';
       this.container.style.height = newH + 'px';
-      this.positionToggleBtn();
     }
     onPointerUpResize(){
       if (!this.resizeState) return;
@@ -509,10 +533,89 @@
       this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
       try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
       this.resizeState = null;
-      this.positionToggleBtn();
     }
 
-    // Exporters
+    /* ===== DRAG NÚT TOGGLE ===== */
+    onPointerDownToggle(e) {
+      // Cho phép kéo với mọi pointer
+      e.preventDefault();
+      const rect = this.toggleBtn.getBoundingClientRect();
+      this.toggleDrag.dragging = true;
+      this.toggleBtn.__dragging = false; // cờ để phân biệt kéo vs click
+      this.toggleDrag.startX = e.clientX;
+      this.toggleDrag.startY = e.clientY;
+      this.toggleDrag.initL = rect.left;
+      this.toggleDrag.initT = rect.top;
+      this.toggleBtn.setPointerCapture?.(e.pointerId);
+      window.addEventListener("pointermove", this.onPointerMoveToggle, { passive: false });
+      window.addEventListener("pointerup", this.onPointerUpToggle);
+    }
+    onPointerMoveToggle(e) {
+      if (!this.toggleDrag.dragging) return;
+      e.preventDefault();
+      const dx = e.clientX - this.toggleDrag.startX;
+      const dy = e.clientY - this.toggleDrag.startY;
+      const w = this.toggleBtn.offsetWidth;
+      const h = this.toggleBtn.offsetHeight;
+      const maxL = window.innerWidth - w - 6;
+      const maxT = window.innerHeight - h - 6;
+      let left = this.toggleDrag.initL + dx;
+      let top  = this.toggleDrag.initT + dy;
+      left = Math.max(6, Math.min(maxL, left));
+      top  = Math.max(6, Math.min(maxT, top));
+      // áp vị trí
+      this.toggleBtn.style.left = left + "px";
+      this.toggleBtn.style.top  = top + "px";
+      this.toggleBtn.style.right = "auto";
+      // đánh dấu là đang kéo để không trigger click
+      if (Math.abs(dx) + Math.abs(dy) > 3) this.toggleBtn.__dragging = true;
+    }
+    onPointerUpToggle(e) {
+      if (!this.toggleDrag.dragging) return;
+      this.toggleDrag.dragging = false;
+      this.toggleBtn.releasePointerCapture?.(e.pointerId);
+      window.removeEventListener("pointermove", this.onPointerMoveToggle);
+      window.removeEventListener("pointerup", this.onPointerUpToggle);
+      // lưu vị trí
+      const rect = this.toggleBtn.getBoundingClientRect();
+      const pos = { left: Math.round(rect.left), top: Math.round(rect.top) };
+      this.togglePos = pos;
+      try { localStorage.setItem(LS_TOGGLE_POS, JSON.stringify(pos)); } catch {}
+      // nhỏ delay để click không ăn sau khi kéo
+      setTimeout(() => { this.toggleBtn.__dragging = false; }, 30);
+    }
+    applyTogglePos() {
+      if (!this.toggleBtn) return;
+      if (this.togglePos) {
+        this.toggleBtn.style.left = this.togglePos.left + "px";
+        this.toggleBtn.style.top  = this.togglePos.top  + "px";
+        this.toggleBtn.style.right = "auto";
+      } else {
+        // mặc định ở góc trên phải
+        this.toggleBtn.style.top = Math.max(12, (this.pos?.top ?? 12)) + "px";
+        this.toggleBtn.style.right = "12px";
+        this.toggleBtn.style.left = "auto";
+      }
+    }
+    boundToggleInside() {
+      if (!this.toggleBtn || !this.toggleBtn.classList.contains("show")) return;
+      const rect = this.toggleBtn.getBoundingClientRect();
+      let left = rect.left, top = rect.top;
+      const w = rect.width, h = rect.height;
+      const maxL = window.innerWidth - w - 6;
+      const maxT = window.innerHeight - h - 6;
+      left = Math.max(6, Math.min(maxL, left));
+      top  = Math.max(6, Math.min(maxT, top));
+      this.toggleBtn.style.left = left + "px";
+      this.toggleBtn.style.top  = top + "px";
+      this.toggleBtn.style.right = "auto";
+      // cập nhật lưu
+      const pos = { left: Math.round(left), top: Math.round(top) };
+      this.togglePos = pos;
+      try { localStorage.setItem(LS_TOGGLE_POS, JSON.stringify(pos)); } catch {}
+    }
+
+    /* ===== Exporters ===== */
     exportToTxt() {
       let fullText = "";
       const blocks = [...this.contentArea.querySelectorAll(".qa-block")]
@@ -536,7 +639,7 @@
       link.remove();
     }
 
-    // GIỮ NGUYÊN HÀM XUẤT PDF (không chỉnh sửa để tránh ảnh hưởng nội dung file)
+    // GIỮ NGUYÊN HÀM XUẤT PDF
     async exportToPDF() {
       try {
         const visibleBlocks = [...this.contentArea.querySelectorAll(".qa-block")]
@@ -546,7 +649,6 @@
         const root = document.createElement("div");
         root.className = "pdf-root";
 
-        // Title yêu cầu
         const header = document.createElement("div");
         header.style.cssText = "font-weight:700;font-size:18px;margin-bottom:6px;text-align:center";
         header.textContent = "Đòn Hư Lém - PDF";
@@ -567,12 +669,10 @@
           root.appendChild(clone);
         });
 
-        // Spacer chống “cụt” trang
         const spacer = document.createElement("div");
         spacer.className = "pdf-spacer";
         root.appendChild(spacer);
 
-        // Typeset clone
         await this.typesetForExport(root);
         await this.waitImages(root);
         await ensureHtml2Pdf();
@@ -707,21 +807,9 @@
       } else {
         c.style.right = "12px"; c.style.left = "auto"; c.style.top = "12px";
       }
-      this.positionToggleBtn();
     }
 
-    positionToggleBtn() {
-      if (!this.toggleBtn) return;
-      let topPx = 12;
-      try {
-        const rect = this.container.getBoundingClientRect();
-        if (rect && Number.isFinite(rect.top)) topPx = Math.max(12, Math.min(window.innerHeight - 52, rect.top));
-      } catch {}
-      this.toggleBtn.style.top = topPx + "px";
-      this.toggleBtn.style.right = "12px";
-      this.toggleBtn.style.left = "auto";
-    }
-    showToggleBtn(){ this.toggleBtn?.classList.add("show"); this.positionToggleBtn(); }
+    showToggleBtn(){ this.toggleBtn?.classList.add("show"); this.applyTogglePos(); this.boundToggleInside(); }
     hideToggleBtn(){ this.toggleBtn?.classList.remove("show"); }
 
     renderContentWithMath(element) {
