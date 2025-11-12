@@ -1,4 +1,4 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         OLM Helper V3
 // @namespace    http://tampermonkey.net/
 // @version      1.8
@@ -106,6 +106,19 @@
     }
   }
 
+  function encodeSvgToDataUri(svgMarkup) {
+    try {
+      const bytes = new TextEncoder().encode(svgMarkup);
+      let binary = "";
+      bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+      const encoded = window.btoa(binary);
+      return `data:image/svg+xml;base64,${encoded}`;
+    } catch (e) {
+      console.error("encodeSvgToDataUri error:", e);
+      return "";
+    }
+  }
+
   function highlightInElement(el, keyword) {
     el.querySelectorAll("." + HIGHLIGHT_CLASS).forEach(n => {
       const p = n.parentNode; while (n.firstChild) p.insertBefore(n.firstChild, n); p.removeChild(n); p.normalize?.();
@@ -165,67 +178,6 @@
       ensureHead(sc);
     });
     return html2pdfReadyPromise;
-  }
-
-  // html-to-docx (for Word export)
-  let htmlToDocxReadyPromise = null;
-  function ensureHtmlToDocx() {
-    if (UW.HTMLToDOCX) return Promise.resolve();
-    if (htmlToDocxReadyPromise) return htmlToDocxReadyPromise;
-    htmlToDocxReadyPromise = new Promise((res, rej) => {
-      const sc = document.createElement("script");
-      sc.src = "https://cdn.jsdelivr.net/npm/html-to-docx@1.8.0/dist/html-to-docx.umd.js";
-      sc.async = true;
-      sc.onload = () => res();
-      sc.onerror = () => rej(new Error("Không tải được html-to-docx"));
-      ensureHead(sc);
-    });
-    return htmlToDocxReadyPromise;
-  }
-
-  // Word V2: tải DOCX trực tiếp từ OLM bằng id chủ đề trong URL
-  async function downloadWordFile(event) {
-    const button = event.target;
-    const originalText = button.textContent;
-    button.textContent = 'Đang xử lý...';
-    button.disabled = true;
-    try {
-      const match = window.location.pathname.match(/(\d+)$/);
-      if (!match || !match[0]) {
-        alert('Lỗi: Không tìm thấy ID chủ đề (dãy số ở cuối link) trong URL.');
-        throw new Error('Không tìm thấy ID chủ đề trong pathname.');
-      }
-      const id_cate = match[0];
-      button.textContent = 'Đang lấy link...';
-      const apiUrl = `https://olm.vn/download-word-for-user?id_cate=${id_cate}&showAns=1&questionNotApproved=0`;
-      const response = await fetch(apiUrl);
-      if (!response.ok) {
-        throw new Error(`Lỗi server OLM: ${response.statusText}`);
-      }
-      const data = await response.json();
-      if (!data || !data.file) {
-        throw new Error('Response JSON không hợp lệ hoặc không có link file.');
-      }
-      const fileUrl = data.file;
-      button.textContent = 'Đang tải về...';
-      const link = document.createElement('a');
-      link.href = fileUrl;
-      link.target = '_blank';
-      let filename = fileUrl.split('/').pop();
-      if (!filename || !filename.includes('.')) {
-        filename = `olm-answers-${id_cate}.docx`;
-      }
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } catch (error) {
-      console.error('Lỗi khi tải file Word:', error);
-      alert(`Đã xảy ra lỗi: ${error.message}`);
-    } finally {
-      button.textContent = originalText;
-      button.disabled = false;
-    }
   }
 
   class AnswerDisplay {
@@ -515,20 +467,17 @@
       exportPdfBtn.textContent = "PDF";
       exportPdfBtn.addEventListener("click", () => this.exportToPDF());
 
-      const exportDocxBtn = document.createElement("button");
-      exportDocxBtn.id = "export-docx-btn"; exportDocxBtn.className = "olm-btn";
-      exportDocxBtn.textContent = "WORD";
-      exportDocxBtn.title = "Xuất DOCX (Word)";
-      exportDocxBtn.addEventListener("click", () => this.exportToDOCX());
+      const exportWordBtn = document.createElement("button");
+      exportWordBtn.id = "export-word-btn"; exportWordBtn.className = "olm-btn";
+      exportWordBtn.textContent = "WORD";
+      exportWordBtn.addEventListener("click", (event) => this.downloadWordFile(event));
 
-      // Word V2 button: tải trực tiếp từ OLM
-      const exportDocxV2Btn = document.createElement("button");
-      exportDocxV2Btn.id = "export-docx2-btn"; exportDocxV2Btn.className = "olm-btn";
-      exportDocxV2Btn.textContent = "Word V2";
-      exportDocxV2Btn.title = "Tải DOCX trực tiếp từ OLM (V2)";
-      exportDocxV2Btn.addEventListener("click", (e) => downloadWordFile(e));
+      const exportWordV2Btn = document.createElement("button");
+      exportWordV2Btn.id = "export-word-v2-btn"; exportWordV2Btn.className = "olm-btn";
+      exportWordV2Btn.textContent = "WORD V2";
+      exportWordV2Btn.addEventListener("click", (event) => this.exportWordV2(event));
 
-      controlsRow.append(darkBtn, collapseBtn, exportTxtBtn, exportPdfBtn, exportDocxBtn, exportDocxV2Btn);
+      controlsRow.append(darkBtn, collapseBtn, exportTxtBtn, exportPdfBtn, exportWordBtn, exportWordV2Btn);
       topbar.append(header, controlsRow);
 
       // Search
@@ -871,6 +820,203 @@
       }
     }
 
+    async exportWordV2(event) {
+      const button = event?.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+      const originalText = button?.textContent ?? "WORD V2";
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Đang tạo...";
+      }
+      try {
+        const visibleBlocks = [...this.contentArea.querySelectorAll(".qa-block")]
+          .filter(b => b.style.display !== "none");
+        if (!visibleBlocks.length) { alert("Không có nội dung để xuất."); return; }
+
+        const wrapper = document.createElement("div");
+        wrapper.className = "word-v2-wrapper";
+
+        const header = document.createElement("div");
+        header.className = "word-v2-header";
+        header.innerHTML = `
+          <h1>OLM Helper - WORD V2</h1>
+          <div class="time">${new Date().toLocaleString("vi-VN")}</div>
+        `;
+        wrapper.appendChild(header);
+
+        visibleBlocks.forEach((block, idx) => {
+          const clone = block.cloneNode(true);
+          const qIndex = clone.querySelector(".q-index");
+          if (qIndex) qIndex.textContent = `Câu ${idx + 1}. `;
+          wrapper.appendChild(clone);
+        });
+
+        await this.prepareWordCloneForDoc(wrapper);
+
+        const styles = `
+          body{ font-family:'Times New Roman',serif; color:#111827; padding:32px; line-height:1.5; font-size:14px; }
+          .word-v2-header{text-align:center;margin-bottom:18px;}
+          .word-v2-header h1{margin:0;font-size:20px;text-transform:uppercase;letter-spacing:0.05em;}
+          .word-v2-header .time{font:12px/1.4 'Segoe UI',sans-serif;color:#475569;}
+          .qa-block{border:1px solid #d1d5db;border-radius:10px;padding:14px 16px;margin-bottom:14px;background:#fff;}
+          .question-content{font-weight:600;margin-bottom:10px;font-size:15px;}
+          .question-content .q-index{color:#0f172a;margin-right:4px;}
+          .content-container{font-weight:400;font-size:14px;}
+          .content-container ul,.content-container ol{margin:6px 0 6px 22px;}
+          .correct-answer{font-weight:600;color:#0f766e;}
+          img{max-width:100%;height:auto;}
+          table{border-collapse:collapse;width:100%;margin:10px 0;}
+          table td, table th{border:1px solid #94a3b8;padding:6px;}
+        `;
+
+        const html = `<!DOCTYPE html>
+          <html lang="vi">
+            <head>
+              <meta charset="utf-8" />
+              <title>OLM Helper - WORD V2</title>
+              <style>${styles}</style>
+            </head>
+            <body>${wrapper.innerHTML}</body>
+          </html>`;
+
+        const blob = new Blob(["\ufeff" + html], { type: "application/msword;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `olm-word-v2-${Date.now()}.doc`;
+        ensureBody(link);
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+        link.remove();
+      } catch (err) {
+        console.error("WORD V2 export error:", err);
+        alert("Tạo WORD V2 thất bại. Thử lại giúp mình nhé!");
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      }
+    }
+
+    async prepareWordCloneForDoc(root) {
+      root.querySelectorAll("script, style").forEach((el) => el.remove());
+      root.querySelectorAll("[contenteditable]").forEach((el) => el.removeAttribute("contenteditable"));
+      root.querySelectorAll("button, input, textarea, select").forEach((el) => el.remove());
+      root.querySelectorAll("." + HIGHLIGHT_CLASS).forEach((mark) => {
+        const parent = mark.parentNode;
+        if (!parent) return;
+        while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+        mark.remove();
+        parent.normalize?.();
+      });
+      root.querySelectorAll("a").forEach((a) => {
+        const span = document.createElement("span");
+        span.innerHTML = a.innerHTML || a.textContent || "";
+        a.replaceWith(span);
+      });
+      await this.convertMathNodesToImages(root);
+      root.querySelectorAll("img").forEach((img) => {
+        const src = img.getAttribute("src") || "";
+        if (!src) return img.remove();
+        if (!src.startsWith("data:")) {
+          try { img.src = new URL(src, location.href).href; } catch {}
+        }
+        img.removeAttribute("loading");
+        img.removeAttribute("decoding");
+        if (!img.style.maxWidth) img.style.maxWidth = "100%";
+        img.style.height = "auto";
+      });
+    }
+
+    async convertMathNodesToImages(root) {
+      const mathNodes = root.querySelectorAll("mjx-container");
+      if (!mathNodes.length) return;
+      const MJ = UW.MathJax;
+      const adaptor = MJ?.startup?.adaptor;
+      if (!MJ || !MJ.mathml2svg || !adaptor) {
+        mathNodes.forEach((node) => this.replaceMathWithFallback(node));
+        return;
+      }
+      await Promise.all([...mathNodes].map(async (node) => {
+        const mathEl = node.querySelector("mjx-assistive-mml math");
+        if (!mathEl) { this.replaceMathWithFallback(node); return; }
+        let svgElement;
+        try {
+          const serialized = new XMLSerializer().serializeToString(mathEl);
+          const isDisplay = node.getAttribute("display") === "true";
+          svgElement = MJ.mathml2svg(serialized, { display: isDisplay });
+        } catch (error) {
+          console.error("mathml2svg failed:", error);
+          this.replaceMathWithFallback(node);
+          return;
+        }
+        const svgMarkup = adaptor.outerHTML(svgElement);
+        const dataUri = encodeSvgToDataUri(svgMarkup);
+        if (!dataUri) { this.replaceMathWithFallback(node); return; }
+        const img = document.createElement("img");
+        img.src = dataUri;
+        img.alt = (node.textContent || "").replace(/\s+/g, " ").trim() || "math";
+        img.style.verticalAlign = "middle";
+        img.style.maxWidth = "100%";
+        node.replaceWith(img);
+      }));
+    }
+
+    replaceMathWithFallback(node) {
+      const span = document.createElement("span");
+      span.textContent = (node.textContent || "").trim() || "[math]";
+      node.replaceWith(span);
+    }
+
+    async downloadWordFile(event) {
+      const button = event?.currentTarget ?? event?.target;
+      const btnEl = button instanceof HTMLElement ? button : null;
+      const originalText = btnEl?.textContent ?? "WORD";
+      if (btnEl) {
+        btnEl.textContent = "Đang xử lý...";
+        btnEl.disabled = true;
+      }
+      try {
+        const match = window.location.pathname.match(/(\d+)$/);
+        if (!match || !match[0]) {
+          alert("Lỗi: Không tìm thấy ID chủ đề");
+          throw new Error("Không tìm thấy ID chủ đề.");
+        }
+        const id_cate = match[0];
+        if (btnEl) btnEl.textContent = "Đang lấy link...";
+        const apiUrl = `https://olm.vn/download-word-for-user?id_cate=${id_cate}&showAns=1&questionNotApproved=0`;
+        const response = await fetch(apiUrl);
+        if (!response.ok) {
+          throw new Error(`Lỗi server OLM: ${response.statusText}`);
+        }
+        const data = await response.json();
+        if (!data || !data.file) {
+          throw new Error("Response JSON không hợp lệ hoặc không có link file.");
+        }
+        const fileUrl = data.file;
+        if (btnEl) btnEl.textContent = "Đang tải về...";
+        const link = document.createElement("a");
+        link.href = fileUrl;
+        link.target = "_blank";
+        let filename = fileUrl.split("/").pop();
+        if (!filename || !filename.includes(".")) {
+          filename = `olm-answers-${id_cate}.docx`;
+        }
+        link.download = filename;
+        ensureBody(link);
+        link.click();
+        link.remove();
+      } catch (error) {
+        console.error("Lỗi khi tải file Word:", error);
+        alert(`Đã xảy ra lỗi: ${error.message}`);
+      } finally {
+        if (btnEl) {
+          btnEl.textContent = originalText;
+          btnEl.disabled = false;
+        }
+      }
+    }
+
     async typesetForExport(root) {
       if (UW.MathJax?.typesetPromise) {
         const box = document.createElement("div");
@@ -881,135 +1027,6 @@
         document.body.appendChild(root);
         box.remove();
         await new Promise(r => setTimeout(r, 30));
-      }
-    }
-
-    // Convert rendered MathJax (mjx-container) inside root to inline PNG images
-    async replaceMathWithImages(root) {
-      try {
-        await ensureHtml2Pdf(); // provides window.html2canvas
-      } catch {}
-      const h2c = UW.html2canvas || window.html2canvas;
-      if (!h2c) return; // best-effort
-
-      const stash = document.createElement("div");
-      stash.style.cssText = "position:fixed;left:-99999px;top:-99999px;width:900px;opacity:0;pointer-events:none;background:#fff";
-      stash.appendChild(root);
-      ensureBody(stash);
-
-      // wait a tick for layout/fonts
-      await new Promise(r => setTimeout(r, 30));
-
-      const mjxNodes = [...stash.querySelectorAll("mjx-container")];
-      for (const node of mjxNodes) {
-        try {
-          node.style.background = "#ffffff";
-          const canvas = await h2c(node, { backgroundColor: null, scale: 2, useCORS: true });
-          const img = document.createElement("img");
-          img.src = canvas.toDataURL("image/png");
-          img.alt = "math";
-          img.style.verticalAlign = "middle";
-          node.replaceWith(img);
-        } catch {}
-      }
-
-      // detach root from stash for caller to use
-      document.body.appendChild(root);
-      stash.remove();
-      await new Promise(r => setTimeout(r, 10));
-    }
-
-    async exportToDOCX() {
-      try {
-        const visibleBlocks = [...this.contentArea.querySelectorAll(".qa-block")]
-          .filter(b => b.style.display !== "none");
-        if (!visibleBlocks.length) { alert("Không có nội dung để xuất."); return; }
-
-        const root = document.createElement("div");
-        root.className = "doc-root";
-
-        const header = document.createElement("div");
-        header.style.cssText = "font-weight:700;font-size:18px;margin-bottom:6px;text-align:center";
-        header.textContent = "OLM Helper - Đề & Đáp án";
-        const time = document.createElement("div");
-        time.style.cssText = "font-family:monospace;font-size:12px;color:#64748b;text-align:center;margin-bottom:12px";
-        time.textContent = new Date().toLocaleString("vi-VN");
-        root.append(header, time);
-
-        visibleBlocks.forEach(b => {
-          const clone = b.cloneNode(true);
-          clone.querySelectorAll("img").forEach(img => {
-            try { img.src = new URL(img.getAttribute("src"), location.href).href; } catch {}
-            img.style.maxWidth = "100%"; img.style.height = "auto";
-          });
-          // Ensure no interactive inputs remain
-          clone.querySelectorAll('input, textarea, button').forEach(el => el.remove());
-          root.appendChild(clone);
-        });
-
-        // Typeset LaTeX to MathJax in the hidden box first
-        await this.typesetForExport(root);
-        // Convert MathJax elements to images for Word compatibility
-        await this.replaceMathWithImages(root);
-
-        // Build HTML with minimal styles for Word
-        const style = `
-          <style>
-            body{ font-family: Arial, Helvetica, sans-serif; font-size: 14px; color:#0f172a; }
-            .qa-block{ page-break-inside: avoid; break-inside: avoid; border:1px solid #ddd; border-radius:10px; padding:12px; margin:0 0 10px; }
-            .q-index{ font-weight:700; margin-right:6px; }
-            .question-content{ font-weight:700; margin-bottom:4px; }
-            .content-container{ font-weight:400; }
-            img{ max-width:100%; height:auto; }
-          </style>`;
-
-        const html = `<!doctype html><html><head><meta charset="utf-8"><title>OLM Export</title>${style}</head><body>${root.innerHTML}</body></html>`;
-
-        await ensureHtmlToDocx();
-        const fileBuffer = await UW.HTMLToDOCX(html, null, {
-          orientation: 'portrait',
-          margins: { top: 720, right: 720, bottom: 720, left: 720 },
-        });
-
-        const blob = new Blob([fileBuffer], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = `olm-${Date.now()}.docx`;
-        ensureBody(link);
-        link.click();
-        link.remove();
-      } catch (err) {
-        console.error("Xuất DOCX lỗi, fallback sang .doc HTML:", err);
-        try {
-          const alt = document.createElement("div");
-          const blocks = [...this.contentArea.querySelectorAll(".qa-block")].filter(b => b.style.display !== "none");
-          blocks.forEach(b => {
-            const clone = b.cloneNode(true);
-            // Filter to only correct answers similar to DOCX path
-            try {
-              clone.querySelectorAll('.content-container').forEach(cc => {
-                const type = cc.dataset ? cc.dataset.type : cc.getAttribute('data-type');
-                if (type === 'answer') {
-                  const lists = cc.querySelectorAll('ol, ul');
-                  lists.forEach(list => {
-                    const correctItems = list.querySelectorAll('li.correct-answer');
-                    if (correctItems.length > 0) {
-                      list.querySelectorAll(':scope > li').forEach(li => {
-                        if (!li.classList.contains('correct-answer')) li.remove();
-                      });
-                    }
-                  });
-                } else {
-                  cc.remove();
-                }
-              });
-            } catch {}
-            alt.appendChild(clone);
-          });
-          const html = `<!doctype html><html><head><meta charset="utf-8"><title>OLM Export</title></head><body>${alt.innerHTML}</body></html>`;
-          const blob = new Blob([html], { type: 'application/msword;charset=utf-8' });
-          const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `olm-${Date.now()}.doc`; ensureBody(link); link.click(); link.remove();
-        } catch {}
       }
     }
 
@@ -1254,11 +1271,6 @@
           const pd = document.createElement("div");
           pd.innerHTML = passage;
           pd.querySelectorAll("ol.quiz-list, ul.quiz-list, .interaction, .form-group, .loigiai, .huong-dan-giai, .explain, .solution, #solution, .guide, .exp, .exp-in, hr").forEach(el => el.remove());
-          // Remove inline fill-in inputs from passage (e.g., 'Trả lời: <input ...>')
-          pd.querySelectorAll('input[data-accept], span.trigger-curriculum-cate, input[type="text"]').forEach(el => {
-            const p = el.closest('p');
-            if (p) p.remove(); else el.remove();
-          });
           stripLeadingHashesFromElement(pd);
           removeNoiseMetaLines(pd);
           const pkey = pd.textContent.trim().replace(/\s+/g, " ");
@@ -1283,10 +1295,12 @@ qChunks.forEach((chunk) => {
           tempDiv.innerHTML = fullHtml;
           // loại bỏ phần list/options/interactive/solution trước khi đưa vào vùng question content
           tempDiv.querySelectorAll("ol.quiz-list, ul.quiz-list, .interaction, .form-group, .loigiai, .huong-dan-giai, .explain, .solution, #solution, .guide, .exp, .exp-in, hr").forEach(el => el.remove());
-          // Remove inline fill-in inputs from question text
-          tempDiv.querySelectorAll('input[data-accept], span.trigger-curriculum-cate, input[type="text"]').forEach(el => {
-            const p = el.closest('p');
-            if (p) p.remove(); else el.remove();
+          // remove inline short-answer inputs so the question text doesn't render empty boxes
+          tempDiv.querySelectorAll(".trigger-curriculum-cate, .trigger-curriculum").forEach(el => el.remove());
+          tempDiv.querySelectorAll("input[data-accept], input[data-placeholder-answer]").forEach((inputEl) => {
+            const parent = inputEl.parentElement;
+            if (parent && parent.childNodes.length === 1) parent.remove();
+            else inputEl.remove();
           });
 
           // *** làm sạch các # đầu dòng trong phần question text trước khi append ***
@@ -1409,4 +1423,6 @@ qChunks.forEach((chunk) => {
     };
   }
 })();
+
+
 
