@@ -39,6 +39,112 @@
   };
   const debounce = (fn, ms) => { let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); }; };
 
+  const COPY_UNLOCK_EVENTS = ["copy", "cut", "paste", "contextmenu", "selectstart", "dragstart", "mousedown", "mouseup", "keydown", "keyup", "beforecopy"];
+  const COPY_ATTRS = ["oncopy", "oncut", "onpaste", "oncontextmenu", "onselectstart", "ondragstart", "onmousedown", "onmouseup", "onkeydown", "onkeyup", "onbeforecopy", "onbeforecut", "onbeforepaste", "style"];
+
+  function injectCopyUnlockCSS() {
+    if (document.documentElement.querySelector("style[data-olm-copy-unlock]")) return;
+    const css = document.createElement("style");
+    css.dataset.olmCopyUnlock = "1";
+    css.textContent = `
+      html, body, body *:not(input):not(textarea):not([contenteditable="true"]) {
+        -webkit-user-select: text !important;
+        -moz-user-select: text !important;
+        -ms-user-select: text !important;
+        user-select: text !important;
+        -webkit-touch-callout: default !important;
+        touch-action: auto !important;
+      }
+      input, textarea, [contenteditable="true"] {
+        -webkit-user-select: auto !important;
+        -moz-user-select: auto !important;
+        -ms-user-select: auto !important;
+        user-select: auto !important;
+      }
+    `.trim();
+    ensureHead(css);
+  }
+
+  function scrubNodeRestrictions(node) {
+    if (!(node instanceof Element)) return;
+    COPY_ATTRS.forEach((attr) => {
+      if (attr === "style") return;
+      if (node.hasAttribute(attr)) node.removeAttribute(attr);
+      if (attr in node) {
+        try { node[attr] = null; } catch {}
+      }
+    });
+    const style = node.style;
+    if (!style) return;
+    style.removeProperty("user-select");
+    style.removeProperty("-moz-user-select");
+    style.removeProperty("-ms-user-select");
+    style.removeProperty("-webkit-user-drag");
+    style.removeProperty("-webkit-user-select");
+    style.removeProperty("-webkit-touch-callout");
+    style.removeProperty("touch-action");
+  }
+
+  function scrubTree(root) {
+    if (!root) return;
+    if (root instanceof Element) scrubNodeRestrictions(root);
+    const scope = root.querySelectorAll ? root.querySelectorAll("*") : [];
+    scope.forEach(scrubNodeRestrictions);
+  }
+
+  function installCopyUnlock() {
+    const swallow = (evt) => {
+      if (!evt) return;
+      if (typeof evt.stopImmediatePropagation === "function") evt.stopImmediatePropagation();
+      if (typeof evt.stopPropagation === "function") evt.stopPropagation();
+      evt.cancelBubble = true;
+    };
+    COPY_UNLOCK_EVENTS.forEach((evtName) => {
+      window.addEventListener(evtName, swallow, { capture: true });
+      document.addEventListener(evtName, swallow, { capture: true });
+    });
+
+    scrubTree(document.documentElement);
+    ready(() => scrubTree(document.body || document.documentElement));
+
+    if (typeof MutationObserver === "function") {
+      const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          if (mutation.type === "attributes") {
+            scrubNodeRestrictions(mutation.target);
+          } else if (mutation.type === "childList") {
+            mutation.addedNodes.forEach((node) => scrubTree(node));
+          }
+        }
+      });
+      observer.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: COPY_ATTRS
+      });
+    }
+  }
+
+  function disableNativeAlerts() {
+    const targets = new Set([window]);
+    if (UW && UW !== window) targets.add(UW);
+    targets.forEach((target) => {
+      if (!target || typeof target.alert !== "function") return;
+      const original = target.alert;
+      const silentAlert = function (...args) {
+        console.debug("[OLMHelper] Alert suppressed:", args[0]);
+      };
+      try { silentAlert.toString = original.toString.bind(original); } catch {}
+      try { Object.defineProperty(silentAlert, "name", { value: "alert" }); } catch {}
+      target.alert = silentAlert;
+    });
+  }
+
+  injectCopyUnlockCSS();
+  installCopyUnlock();
+  disableNativeAlerts();
+
   function decodeBase64Utf8(base64) {
     try {
       const bin = atob(base64);
@@ -341,7 +447,8 @@
         #olm-answers-container.olm-dark .qa-block{ background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.08); }
 
         /* Passage shown once for a group of questions */
-        .passage-block{ display:block; padding:12px; border-radius:10px; background:#ffffffdd; border:1px dashed rgba(15,23,42,0.15); color: var(--text-main); }
+        .passage-block{ display:block; padding:12px; border-radius:10px; background:rgba(255,255,255,0.9); border:1px dashed rgba(15,23,42,0.15); color: var(--text-main); }
+        #olm-answers-container.olm-dark .passage-block{ background:rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.18); }
 
         .qa-top{ display:flex; align-items:flex-start; gap:10px; }
         .question-content{ font-weight:700; color:var(--text-main); font-size:14px; flex:1; }
@@ -733,10 +840,7 @@
         const header = document.createElement("div");
         header.style.cssText = "font-weight:700;font-size:18px;margin-bottom:6px;text-align:center";
         header.textContent = "Đòn Hư Lém - PDF";
-        const time = document.createElement("div");
-        time.style.cssText = "font-family:monospace;font-size:12px;color:#64748b;text-align:center;margin-bottom:12px";
-        time.textContent = new Date().toLocaleString("vi-VN");
-        root.append(header, time);
+        root.append(header);
 
         visibleBlocks.forEach(b => {
           const clone = b.cloneNode(true);
@@ -797,11 +901,9 @@
               img{ max-width:100%; height:auto; }
               .pdf-spacer{ height: 24px; }
               h1{ font-size:18px; text-align:center; margin:0 0 6px; }
-              .time{ font: 12px/1 monospace; color:#64748b; text-align:center; margin-bottom:12px; }
             </style>
           </head><body>
             <h1>Đòn Hư Lém - PDF</h1>
-            <div class="time">${new Date().toLocaleString("vi-VN")}</div>
           </body></html>`);
           const body = w.document.body;
           const blocks = [...this.contentArea.querySelectorAll(".qa-block")].filter(b => b.style.display !== "none");
@@ -839,7 +941,6 @@
         header.className = "word-v2-header";
         header.innerHTML = `
           <h1>OLM Helper - WORD V2</h1>
-          <div class="time">${new Date().toLocaleString("vi-VN")}</div>
         `;
         wrapper.appendChild(header);
 
@@ -856,7 +957,6 @@
           body{ font-family:'Times New Roman',serif; color:#111827; padding:32px; line-height:1.5; font-size:14px; }
           .word-v2-header{text-align:center;margin-bottom:18px;}
           .word-v2-header h1{margin:0;font-size:20px;text-transform:uppercase;letter-spacing:0.05em;}
-          .word-v2-header .time{font:12px/1.4 'Segoe UI',sans-serif;color:#475569;}
           .qa-block{border:1px solid #d1d5db;border-radius:10px;padding:14px 16px;margin-bottom:14px;background:#fff;}
           .question-content{font-weight:600;margin-bottom:10px;font-size:15px;}
           .question-content .q-index{color:#0f172a;margin-right:4px;}
@@ -1245,8 +1345,6 @@
       if (!Array.isArray(data)) return;
 
       const responseContainer = document.createElement("div");
-      const timestamp = new Date().toLocaleTimeString();
-      responseContainer.innerHTML = `<p style="font-family:monospace;font-size:12px;background:rgba(0,0,0,0.06);padding:6px;border-radius:6px;"><b>Time:</b> ${timestamp}</p>`;
 
       data.forEach((question) => {
         // Giải mã nội dung gốc
@@ -1350,6 +1448,23 @@ qChunks.forEach((chunk) => {
       this.updateCounts();
       this.renderContentWithMath(this.contentArea);
       const kw = this.searchInput?.value?.trim(); if (kw) highlightInElement(this.contentArea, kw);
+      this.syncPassageBlocksVisibility();
+    }
+
+    syncPassageBlocksVisibility() {
+      const passages = this.contentArea.querySelectorAll(".passage-block");
+      passages.forEach((passage) => {
+        let next = passage.nextElementSibling;
+        let hasVisible = false;
+        while (next && !next.classList.contains("passage-block")) {
+          if (next.classList.contains("qa-block") && next.style.display !== "none") {
+            hasVisible = true;
+            break;
+          }
+          next = next.nextElementSibling;
+        }
+        passage.style.display = hasVisible ? "" : "none";
+      });
     }
 
 
@@ -1381,6 +1496,7 @@ qChunks.forEach((chunk) => {
       });
       this.countBadge.textContent = `${shown} / ${blocks.length} hiển thị`;
       this.renumber(); this.renderContentWithMath(this.contentArea);
+      this.syncPassageBlocksVisibility();
     }
 
   }
@@ -1423,6 +1539,3 @@ qChunks.forEach((chunk) => {
     };
   }
 })();
-
-
-
