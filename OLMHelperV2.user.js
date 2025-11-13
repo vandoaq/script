@@ -16,6 +16,7 @@
   "use strict";
 
   const TOGGLE_ICON_URL = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTMdM9MEQ0ExL1PmInT3U5I8v63YXBEdoIT0Q&s";
+  const BRAND_LINK_URL = "https://vandoaq.github.io";
 
   const UW = (typeof unsafeWindow !== "undefined" && unsafeWindow) ? unsafeWindow : window;
   const TARGET_URL_KEYWORD = "get-question-of-ids";
@@ -23,6 +24,8 @@
   const LS_POS  = "olm_pos";
   const LS_DARK = "olm_dark";
   const LS_TOGGLE_POS = "olm_toggle_pos";
+  const LS_STEALTH = "olm_stealth";
+  const LS_AUTO_SEARCH = "olm_auto_search";
   const HIGHLIGHT_CLASS = "olm-hl";
 
   const ready = (fn) => {
@@ -41,6 +44,8 @@
 
   const COPY_UNLOCK_EVENTS = ["copy", "cut", "paste", "contextmenu", "selectstart", "dragstart", "mousedown", "mouseup", "keydown", "keyup", "beforecopy"];
   const COPY_ATTRS = ["oncopy", "oncut", "onpaste", "oncontextmenu", "onselectstart", "ondragstart", "onmousedown", "onmouseup", "onkeydown", "onkeyup", "onbeforecopy", "onbeforecut", "onbeforepaste", "style"];
+  const STEALTH_EVENTS = ["visibilitychange", "webkitvisibilitychange", "pagehide", "freeze", "blur", "focusout"];
+  let STEALTH_ACTIVE = false;
 
   function injectCopyUnlockCSS() {
     if (document.documentElement.querySelector("style[data-olm-copy-unlock]")) return;
@@ -144,6 +149,73 @@
   injectCopyUnlockCSS();
   installCopyUnlock();
   disableNativeAlerts();
+
+  const stealthEventHandler = (evt) => {
+    if (!STEALTH_ACTIVE) return;
+    evt.stopImmediatePropagation?.();
+    evt.stopPropagation?.();
+    evt.preventDefault?.();
+  };
+
+  function setStealthActive(flag) {
+    STEALTH_ACTIVE = !!flag;
+  }
+
+  function installStealthGuards() {
+    if (installStealthGuards._done) return;
+    installStealthGuards._done = true;
+    try {
+      STEALTH_EVENTS.forEach((evt) => {
+        document.addEventListener(evt, stealthEventHandler, true);
+        window.addEventListener(evt, stealthEventHandler, true);
+      });
+    } catch (e) {
+      console.error("installStealthGuards error:", e);
+    }
+    patchVisibilityProps();
+  }
+
+  function patchVisibilityProps() {
+    if (patchVisibilityProps._done) return;
+    patchVisibilityProps._done = true;
+    const docProto = Object.getPrototypeOf(document);
+    const visDesc = docProto ? Object.getOwnPropertyDescriptor(docProto, "visibilityState") : null;
+    const hiddenDesc = docProto ? Object.getOwnPropertyDescriptor(docProto, "hidden") : null;
+    const getVis = visDesc?.get ? visDesc.get.bind(document) : null;
+    const getHidden = hiddenDesc?.get ? hiddenDesc.get.bind(document) : null;
+
+    try {
+      if (visDesc && visDesc.configurable !== false) {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          enumerable: visDesc.enumerable,
+          get() {
+            if (STEALTH_ACTIVE) return "visible";
+            return getVis ? getVis() : (visDesc.value ?? "visible");
+          }
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to override document.visibilityState:", e);
+    }
+
+    try {
+      if (hiddenDesc && hiddenDesc.configurable !== false) {
+        Object.defineProperty(document, "hidden", {
+          configurable: true,
+          enumerable: hiddenDesc.enumerable,
+          get() {
+            if (STEALTH_ACTIVE) return false;
+            return getHidden ? getHidden() : !!hiddenDesc.value;
+          }
+        });
+      }
+    } catch (e) {
+      console.warn("Failed to override document.hidden:", e);
+    }
+  }
+
+  installStealthGuards();
 
   function decodeBase64Utf8(base64) {
     try {
@@ -308,6 +380,16 @@
         if (saved !== null) return saved === "1";
         return window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
       })();
+      this.stealthMode = (() => {
+        const saved = localStorage.getItem(LS_STEALTH);
+        return saved === "1";
+      })();
+      setStealthActive(this.stealthMode);
+      this.autoSearchEnabled = (() => {
+        const saved = localStorage.getItem(LS_AUTO_SEARCH);
+        if (saved === null) return true;
+        return saved === "1";
+      })();
 
       try { const saved = JSON.parse(localStorage.getItem(LS_SIZE) || "null"); if (saved?.w && saved?.h) this.size = saved; } catch {}
       try { const p = JSON.parse(localStorage.getItem(LS_POS)  || "null"); if (Number.isFinite(p?.left) && Number.isFinite(p?.top)) this.pos = p; } catch {}
@@ -321,14 +403,24 @@
       this.onPointerDownResize = this.onPointerDownResize.bind(this);
       this.onPointerMoveResize = this.onPointerMoveResize.bind(this);
       this.onPointerUpResize   = this.onPointerUpResize.bind(this);
+      this.onWindowResize      = this.onWindowResize.bind(this);
 
       // Drag nút toggle
       this.onPointerDownToggle = this.onPointerDownToggle.bind(this);
       this.onPointerMoveToggle = this.onPointerMoveToggle.bind(this);
       this.onPointerUpToggle   = this.onPointerUpToggle.bind(this);
 
+      this.handleSelectionChange = this.handleSelectionChange.bind(this);
+      this.lastSelectionText = "";
+      this.onControlsSliderInput = this.onControlsSliderInput.bind(this);
+      this.syncControlsSlider = this.syncControlsSlider.bind(this);
+      this.updateControlsSliderState = this.updateControlsSliderState.bind(this);
+
       // Track passages already rendered to avoid duplicates across questions
       this.renderedPassages = new Set();
+      this.controlsRow = null;
+      this.controlsSlider = null;
+      this.autoSearchBtn = null;
     }
 
     init() {
@@ -337,7 +429,10 @@
       this.addEventListeners();
       if (this.dark) this.container.classList.add("olm-dark");
       this.applyPosOnly();
+      this.ensureContainerInViewport();
       this.applyTogglePos();  // đặt vị trí nút nổi nếu có
+      this.applyAutoSearchState(this.autoSearchEnabled);
+      this.applyStealthMode(this.stealthMode);
     }
 
     injectCSS() {
@@ -382,10 +477,11 @@
           --bg-top: rgba(255,255,255,0.06);
           --bg-sub: rgba(255,255,255,0.08);
           --shadow: 0 10px 30px rgba(0,0,0,0.55);
-          --text-main: #e5e7eb; --text-sub: #cbd5e1;
+          --text-main: #e5e7eb; --text-sub: #f1f5f9;
           --btn-bg: #1f2937;
           --btn-fg: #e5e7eb;
           --btn-border: #4b5563;
+          --muted: #e2e8f0;
         }
 
         .olm-topbar{
@@ -405,10 +501,76 @@
         .olm-title-line{ display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
         .olm-title-line .tt-strong{ font-size:14px; font-weight:800; }
         .olm-title-line .tt-sub{ font-size:12px; color: var(--muted); }
+        .olm-title-line .tt-sub .brand-link{
+          color: inherit;
+          text-decoration: underline;
+          text-decoration-thickness: 1px;
+          text-decoration-color: currentColor;
+          transition: color .15s ease, text-shadow .15s ease;
+        }
+        .olm-title-line .tt-sub .brand-link:hover{
+          color: #fbbf24;
+          text-shadow: 0 0 8px rgba(251,191,36,0.7);
+        }
 
+        .olm-controls-wrap{
+          display:flex; flex-direction:column; gap:4px; position:relative; width:100%;
+        }
         .olm-controls-row{
-          display:flex; gap:8px; align-items:center;
+          display:flex; gap:8px; align-items:center; flex-wrap:nowrap;
           overflow-x:auto; -webkit-overflow-scrolling: touch; padding-top:2px;
+          scrollbar-width: none;
+        }
+        .olm-controls-row::-webkit-scrollbar{ height:0; }
+        .olm-controls-row .olm-btn{ flex:0 0 auto; min-width:max-content; }
+        #olm-answers-container .controls-slider{
+          width:100%;
+          height:6px;
+          border-radius:999px;
+          background:linear-gradient(90deg,rgba(15,23,42,0.15),rgba(15,23,42,0.05));
+          appearance:none;
+          border:none;
+          outline:none;
+          cursor:pointer;
+          order:-1;
+          margin-bottom:4px;
+          box-shadow:inset 0 1px 2px rgba(15,23,42,0.2);
+        }
+        #olm-answers-container .controls-slider:focus-visible{
+          box-shadow:0 0 0 2px rgba(59,130,246,0.35), inset 0 1px 2px rgba(15,23,42,0.2);
+        }
+        #olm-answers-container .controls-slider::-webkit-slider-runnable-track{
+          height:6px; border-radius:999px; background:transparent;
+        }
+        #olm-answers-container .controls-slider::-webkit-slider-thumb{
+          appearance:none;
+          width:18px; height:18px; border-radius:50%;
+          background:radial-gradient(circle at 30% 30%, #fafcff, #dbeafe);
+          border:1px solid rgba(37,99,235,0.6);
+          box-shadow:0 4px 10px rgba(15,23,42,0.25);
+          margin-top:-6px;
+        }
+        #olm-answers-container .controls-slider::-moz-range-track{
+          height:6px; border-radius:999px; background:transparent;
+        }
+        #olm-answers-container .controls-slider::-moz-range-thumb{
+          width:18px; height:18px; border-radius:50%;
+          border:1px solid rgba(37,99,235,0.6);
+          background:radial-gradient(circle at 30% 30%, #fafcff, #dbeafe);
+          box-shadow:0 4px 10px rgba(15,23,42,0.25);
+        }
+        #olm-answers-container.olm-dark .controls-slider{
+          background:linear-gradient(90deg,rgba(255,255,255,0.18),rgba(255,255,255,0.08));
+          box-shadow:inset 0 1px 2px rgba(0,0,0,0.35);
+        }
+        #olm-answers-container.olm-dark .controls-slider:focus-visible{
+          box-shadow:0 0 0 2px rgba(14,165,233,0.35), inset 0 1px 2px rgba(0,0,0,0.35);
+        }
+        #olm-answers-container.olm-dark .controls-slider::-webkit-slider-thumb,
+        #olm-answers-container.olm-dark .controls-slider::-moz-range-thumb{
+          border:1px solid rgba(125,211,252,0.8);
+          background:radial-gradient(circle at 30% 30%, #f0f9ff, #0f172a);
+          box-shadow:0 4px 12px rgba(8,145,178,0.45);
         }
 
         /* Nút riêng namespace #olm-answers-container để không ảnh hưởng web */
@@ -426,6 +588,9 @@
           color: var(--btn-fg);
           white-space: nowrap;
           user-select:none;
+          position:relative;
+          overflow:hidden;
+          transition: background .2s ease, color .2s ease, box-shadow .2s ease, transform .2s ease;
         }
         #olm-answers-container .olm-btn svg{ fill: currentColor; }
         #olm-answers-container .olm-btn:active{ transform: translateY(1px); }
@@ -435,6 +600,55 @@
           border-color: var(--btn-border);
         }
         #olm-answers-container.olm-dark .olm-btn.is-ghost{ color: var(--text-main); }
+        #olm-answers-container .olm-btn.glow-toggle{
+          background:#fff;
+          color:#0f172a;
+          border:1px solid rgba(15,23,42,0.12);
+          box-shadow:0 1px 2px rgba(15,23,42,0.08);
+        }
+        #olm-answers-container .olm-btn.glow-toggle:hover,
+        #olm-answers-container .olm-btn.glow-toggle:focus-visible{
+          box-shadow:0 0 0 1px rgba(37,99,235,0.35);
+        }
+        #olm-answers-container.olm-dark .olm-btn.glow-toggle{
+          background:transparent;
+          color:var(--text-main);
+          border:1px solid rgba(148,163,184,0.45);
+          box-shadow:0 0 0 1px rgba(15,23,42,0.6);
+        }
+        #olm-answers-container .olm-btn.glow-toggle.is-active{
+          border:1px solid transparent;
+          background:
+            linear-gradient(#fff,#fff) padding-box,
+            linear-gradient(130deg,#2563eb,#06b6d4,#a855f7,#f97316,#facc15,#2563eb) border-box;
+          background-size:100% 100%, 280% 280%;
+          background-position:0 0, 0% 50%;
+          color:#0f172a;
+          box-shadow:0 0 20px rgba(37,99,235,0.35);
+          animation:glowSweep 3s linear infinite;
+        }
+        #olm-answers-container .olm-btn.glow-toggle.is-active::after{
+          content:"";
+          position:absolute;
+          inset:2px;
+          border-radius:inherit;
+          border:1px solid rgba(255,255,255,0.4);
+          pointer-events:none;
+        }
+        #olm-answers-container.olm-dark .olm-btn.glow-toggle.is-active{
+          background:
+            linear-gradient(rgba(8,11,20,0.9),rgba(8,11,20,0.9)) padding-box,
+            linear-gradient(130deg,#38bdf8,#a855f7,#f97316,#facc15,#38bdf8) border-box;
+          color:#f8fafc;
+          box-shadow:0 0 24px rgba(14,165,233,0.5);
+        }
+        #olm-answers-container.olm-dark .olm-btn.glow-toggle.is-active::after{
+          border-color:rgba(148,163,184,0.55);
+        }
+        @keyframes glowSweep{
+          0%{ background-position:0 0, 0% 50%; }
+          100%{ background-position:0 0, 300% 50%; }
+        }
 
         .search-wrap{ display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid rgba(0,0,0,0.06); background: var(--bg-sub); }
         #olm-answers-container.olm-dark .search-wrap{ border-bottom-color: rgba(255,255,255,0.06); }
@@ -544,7 +758,13 @@
       ttStrong.textContent = "OLM Helper";
       const ttSub = document.createElement("span");
       ttSub.className = "tt-sub";
-      ttSub.textContent = "by Đòn Hư Lém";
+      const brandLink = document.createElement("a");
+      brandLink.className = "brand-link";
+      brandLink.textContent = "Đòn Hư Lém";
+      brandLink.href = BRAND_LINK_URL || "#";
+      brandLink.rel = "noopener";
+      if (BRAND_LINK_URL) brandLink.target = "_blank";
+      ttSub.append("by ", brandLink);
       titleLine.append(ttStrong, ttSub);
 
       brand.append(logo, titleLine);
@@ -553,14 +773,27 @@
       // Controls
       const controlsRow = document.createElement("div");
       controlsRow.className = "olm-controls-row";
+      const controlsWrap = document.createElement("div");
+      controlsWrap.className = "olm-controls-wrap";
 
       const darkBtn = document.createElement("button");
-      darkBtn.className = "olm-btn is-ghost"; darkBtn.title = "Dark mode (Alt D)"; darkBtn.setAttribute("aria-label","Toggle dark mode");
+      darkBtn.className = "olm-btn is-ghost"; darkBtn.title = "Dark mode"; darkBtn.setAttribute("aria-label","Toggle dark mode");
       darkBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>`;
       darkBtn.addEventListener("click", () => this.toggleDarkMode());
 
+      const stealthBtn = document.createElement("button");
+      stealthBtn.className = "olm-btn glow-toggle";
+      stealthBtn.title = "Chế độ chống phát hiện khi rời tab/app";
+      stealthBtn.textContent = "Stealth";
+      stealthBtn.addEventListener("click", () => this.toggleStealthMode());
+      const autoSearchBtn = document.createElement("button");
+      autoSearchBtn.className = "olm-btn glow-toggle";
+      autoSearchBtn.title = "Bat/tat tu dong tim kiem khi boi den";
+      autoSearchBtn.textContent = "Auto Search";
+      autoSearchBtn.addEventListener("click", () => this.toggleAutoSearch());
+
       const collapseBtn = document.createElement("button");
-      collapseBtn.className = "olm-btn is-ghost"; collapseBtn.title = "Ẩn/Hiện (Shift phải)";
+      collapseBtn.className = "olm-btn is-ghost"; collapseBtn.title = "Ẩn/Hiện";
       collapseBtn.textContent = "Hide";
       collapseBtn.addEventListener("click", () => this.toggleVisibility());
 
@@ -584,14 +817,28 @@
       exportWordV2Btn.textContent = "WORD V2";
       exportWordV2Btn.addEventListener("click", (event) => this.exportWordV2(event));
 
-      controlsRow.append(darkBtn, collapseBtn, exportTxtBtn, exportPdfBtn, exportWordBtn, exportWordV2Btn);
-      topbar.append(header, controlsRow);
+      controlsRow.append(darkBtn, collapseBtn, stealthBtn, autoSearchBtn, exportTxtBtn, exportPdfBtn, exportWordBtn, exportWordV2Btn);
+      const controlsSlider = document.createElement("input");
+      controlsSlider.type = "range";
+      controlsSlider.min = "0";
+      controlsSlider.max = "100";
+      controlsSlider.value = "0";
+      controlsSlider.className = "controls-slider";
+      controlsSlider.title = "Keo de xem them nut";
+      controlsSlider.setAttribute("aria-label", "Keo de xem them nut");
+      controlsSlider.hidden = true;
+      controlsSlider.addEventListener("pointerdown", (evt) => evt.stopPropagation());
+      controlsSlider.addEventListener("keydown", (evt) => evt.stopPropagation());
+      controlsSlider.addEventListener("input", this.onControlsSliderInput);
+      controlsRow.addEventListener("scroll", this.syncControlsSlider, { passive: true });
+      controlsWrap.append(controlsSlider, controlsRow);
+      topbar.append(header, controlsWrap);
 
       // Search
       const searchWrap = document.createElement("div"); searchWrap.className = "search-wrap";
       const searchInput = document.createElement("input");
       searchInput.className = "search-input";
-      searchInput.placeholder = "Tìm theo từ khóa (Alt F để focus)";
+      searchInput.placeholder = "Tìm theo từ khóa";
       searchInput.addEventListener("input", (e) => this.filterDebounced(e.target.value));
       const meta = document.createElement("div"); meta.className = "meta"; meta.id = "meta-info"; meta.textContent = "0 câu";
       searchWrap.append(searchInput, meta);
@@ -602,7 +849,7 @@
       // Footer
       const footer = document.createElement("div"); footer.className = "footer-bar";
       const hint = document.createElement("div"); hint.style.fontSize = "12px"; hint.style.color = "var(--muted)";
-      hint.textContent = "Shift phải: ẩn/hiện • Alt F: tìm • Alt A: copy đáp án hiển thị";
+      hint.textContent = "Note* Word có bài không dùng được • WordV2 lỗi hiển thị công thức Toán";
       const countBadge = document.createElement("div"); countBadge.id = "count-badge"; countBadge.textContent = "0 câu";
       footer.append(hint, countBadge);
 
@@ -620,6 +867,11 @@
       this.countBadge = countBadge;
       this.metaInfo = meta;
       this.darkBtn = darkBtn;
+      this.stealthBtn = stealthBtn;
+      this.autoSearchBtn = autoSearchBtn;
+      this.controlsRow = controlsRow;
+      this.controlsSlider = controlsSlider;
+      this.updateControlsSliderState();
 
       // Floating toggle (draggable + icon img)
       const tbtn = document.createElement("div");
@@ -644,9 +896,66 @@
 
     addEventListeners() {
       window.addEventListener("keydown", this.onKeyDown);
-      // Không tự reposition nút theo container nữa. Nút có vị trí độc lập do người dùng kéo.
-      window.addEventListener("resize", () => this.boundToggleInside());
+      // Đảm bảo panel & nút không trượt ra ngoài khi đổi kích thước màn hình
+      window.addEventListener("resize", this.onWindowResize);
       window.addEventListener("scroll", () => {}, { passive: true });
+      document.addEventListener("selectionchange", this.handleSelectionChange);
+    }
+
+    onWindowResize() {
+      this.ensureContainerInViewport();
+      this.boundToggleInside();
+      this.updateControlsSliderState();
+    }
+
+    handleSelectionChange() {
+      if (!this.autoSearchEnabled || !this.searchInput || !this.filterDebounced) return;
+      const sel = document.getSelection();
+      if (!sel || sel.isCollapsed) return;
+      const text = sel.toString().trim();
+      if (!text || text.length > 200) return;
+      const anchor = sel.anchorNode;
+      const focus = sel.focusNode;
+      if ((anchor && this.container?.contains(anchor)) || (focus && this.container?.contains(focus))) return;
+      if (text === this.lastSelectionText) return;
+      this.lastSelectionText = text;
+      this.searchInput.value = text;
+      this.filterDebounced(text);
+    }
+
+    onControlsSliderInput(event) {
+      if (!this.controlsRow) return;
+      const maxScroll = this.controlsRow.scrollWidth - this.controlsRow.clientWidth;
+      if (maxScroll <= 0) return;
+      const slider = event.currentTarget;
+      const value = Number(slider?.value ?? 0);
+      this.controlsRow.scrollLeft = Math.max(0, Math.min(maxScroll, (value / 100) * maxScroll));
+    }
+
+    syncControlsSlider() {
+      if (!this.controlsRow || !this.controlsSlider || this.controlsSlider.hidden) return;
+      const maxScroll = this.controlsRow.scrollWidth - this.controlsRow.clientWidth;
+      if (maxScroll <= 0) {
+        if (this.controlsSlider.value !== "0") this.controlsSlider.value = "0";
+        return;
+      }
+      const ratio = this.controlsRow.scrollLeft / maxScroll;
+      const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+      const next = String(pct);
+      if (this.controlsSlider.value !== next) this.controlsSlider.value = next;
+    }
+
+    updateControlsSliderState() {
+      if (!this.controlsRow || !this.controlsSlider) return;
+      const maxScroll = this.controlsRow.scrollWidth - this.controlsRow.clientWidth;
+      const needsSlider = maxScroll > 4;
+      this.controlsSlider.hidden = !needsSlider;
+      if (!needsSlider) {
+        this.controlsSlider.value = "0";
+        this.controlsRow.scrollLeft = 0;
+        return;
+      }
+      this.syncControlsSlider();
     }
 
     /* ===== Drag & resize panel ===== */
@@ -711,6 +1020,7 @@
       newH = Math.max(minH, Math.min(maxH, newH));
       this.container.style.width  = newW + 'px';
       this.container.style.height = newH + 'px';
+      this.updateControlsSliderState();
     }
     onPointerUpResize(){
       if (!this.resizeState) return;
@@ -720,6 +1030,7 @@
       const rect = this.container.getBoundingClientRect();
       this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
       try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
+      this.updateControlsSliderState();
       this.resizeState = null;
     }
 
@@ -805,6 +1116,7 @@
 
     /* ===== Exporters ===== */
     exportToTxt() {
+      const clean = (txt) => txt.replace(/\s+/g, " ").trim();
       let fullText = "";
       const blocks = [...this.contentArea.querySelectorAll(".qa-block")]
         .filter(b => b.style.display !== "none");
@@ -813,9 +1125,28 @@
         const q = block.querySelector(".question-content");
         const content = block.querySelector(".content-container");
         if (!q || !content) return;
-        const textQ = q.textContent.trim().replace(/\s\s+/g, " ");
-        const textA = content.textContent.trim().replace(/\s\s+/g, " ");
-        fullText += `${textQ}\n--> ${textA}\n\n`;
+
+        const textQ = clean(q.textContent || "");
+        let answerLines = [];
+
+        if (content.dataset.type === "answer") {
+          const correctNodes = [...content.querySelectorAll(".correct-answer")];
+          const correctTexts = correctNodes
+            .map(node => clean(node.textContent || ""))
+            .filter(Boolean);
+          if (correctTexts.length) {
+            answerLines = correctTexts.map(text => `--> ${text}`);
+          }
+        }
+
+        if (!answerLines.length) {
+          const fallback = clean(content.textContent || "");
+          if (fallback) answerLines = [`--> ${fallback}`];
+        }
+
+        if (answerLines.length) {
+          fullText += `${textQ}\n${answerLines.join("\n")}\n\n`;
+        }
       });
 
       const blob = new Blob([fullText], { type: "text/plain;charset=utf-8" });
@@ -1156,12 +1487,9 @@
     }
 
     onKeyDown(event) {
-      if (event.code === "ShiftRight") this.toggleVisibility();
       if (event.altKey && !event.shiftKey && !event.ctrlKey) {
         const k = event.key.toLowerCase();
-        if (k === "f") { event.preventDefault(); this.searchInput.focus(); this.searchInput.select(); }
-        else if (k === "a") { event.preventDefault(); this.copyAllVisibleAnswers(); }
-        else if (k === "d") { event.preventDefault(); this.toggleDarkMode(); }
+        if (k === "a") { event.preventDefault(); this.copyAllVisibleAnswers(); }
       }
     }
 
@@ -1175,6 +1503,39 @@
       this.dark = !this.dark;
       this.container.classList.toggle("olm-dark", this.dark);
       try { localStorage.setItem(LS_DARK, this.dark ? "1" : "0"); } catch {}
+      this.updateControlsSliderState();
+    }
+
+    toggleStealthMode() {
+      this.applyStealthMode(!this.stealthMode);
+    }
+
+    toggleAutoSearch() {
+      this.applyAutoSearchState(!this.autoSearchEnabled);
+    }
+
+    applyAutoSearchState(force) {
+      this.autoSearchEnabled = !!force;
+      if (this.autoSearchBtn) {
+        this.autoSearchBtn.classList.toggle("is-active", this.autoSearchEnabled);
+        this.autoSearchBtn.textContent = this.autoSearchEnabled ? "Auto Search ON" : "Auto Search";
+        this.autoSearchBtn.setAttribute("aria-pressed", this.autoSearchEnabled ? "true" : "false");
+      }
+      if (!this.autoSearchEnabled) this.lastSelectionText = "";
+      try { localStorage.setItem(LS_AUTO_SEARCH, this.autoSearchEnabled ? "1" : "0"); } catch {}
+      this.updateControlsSliderState();
+    }
+
+    applyStealthMode(force) {
+      this.stealthMode = !!force;
+      setStealthActive(this.stealthMode);
+      if (this.stealthBtn) {
+        this.stealthBtn.classList.toggle("is-active", this.stealthMode);
+        this.stealthBtn.textContent = this.stealthMode ? "Stealth ON" : "Stealth";
+        this.stealthBtn.setAttribute("aria-pressed", this.stealthMode ? "true" : "false");
+      }
+      try { localStorage.setItem(LS_STEALTH, this.stealthMode ? "1" : "0"); } catch {}
+      this.updateControlsSliderState();
     }
 
     applyPosOnly() {
@@ -1184,6 +1545,46 @@
         c.style.top  = this.pos.top  + "px";
       } else {
         c.style.right = "12px"; c.style.left = "auto"; c.style.top = "12px";
+      }
+    }
+
+    ensureContainerInViewport() {
+      if (!this.container) return;
+      const style = this.container.style;
+      let rect = this.container.getBoundingClientRect();
+
+      const maxWidth = Math.max(240, window.innerWidth - 16);
+      const maxHeight = Math.max(240, window.innerHeight - 16);
+      let adjustedSize = false;
+
+      if (rect.width > maxWidth) {
+        style.width = `${maxWidth}px`;
+        adjustedSize = true;
+      }
+      if (rect.height > maxHeight) {
+        style.height = `${maxHeight}px`;
+        adjustedSize = true;
+      }
+      if (adjustedSize) rect = this.container.getBoundingClientRect();
+
+      const maxLeft = Math.max(6, window.innerWidth - rect.width - 6);
+      const maxTop = Math.max(6, window.innerHeight - rect.height - 6);
+      let left = rect.left;
+      let top = rect.top;
+
+      left = Math.min(Math.max(left, 6), maxLeft);
+      top  = Math.min(Math.max(top, 6), maxTop);
+
+      style.left = `${left}px`;
+      style.right = "auto";
+      style.top = `${top}px`;
+
+      this.pos = { left: Math.round(left), top: Math.round(top) };
+      try { localStorage.setItem(LS_POS, JSON.stringify(this.pos)); } catch {}
+
+      if (adjustedSize) {
+        this.size = { w: Math.round(this.container.offsetWidth), h: Math.round(this.container.offsetHeight) };
+        try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
       }
     }
 
