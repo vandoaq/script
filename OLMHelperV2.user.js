@@ -412,15 +412,19 @@
 
       this.handleSelectionChange = this.handleSelectionChange.bind(this);
       this.lastSelectionText = "";
-      this.onControlsSliderInput = this.onControlsSliderInput.bind(this);
-      this.syncControlsSlider = this.syncControlsSlider.bind(this);
-      this.updateControlsSliderState = this.updateControlsSliderState.bind(this);
+      this.onControlsPointerDown = this.onControlsPointerDown.bind(this);
+      this.onControlsPointerMove = this.onControlsPointerMove.bind(this);
+      this.onControlsPointerUp = this.onControlsPointerUp.bind(this);
+      this.onControlsClickCapture = this.onControlsClickCapture.bind(this);
+      this.updateSearchClearState = this.updateSearchClearState.bind(this);
 
       // Track passages already rendered to avoid duplicates across questions
       this.renderedPassages = new Set();
       this.controlsRow = null;
-      this.controlsSlider = null;
       this.autoSearchBtn = null;
+      this.controlsScroll = { dragging: false, startX: 0, scrollLeft: 0, moved: false };
+      this.controlsDragPreventClick = false;
+      this.searchClearBtn = null;
     }
 
     init() {
@@ -491,7 +495,8 @@
         }
         #olm-answers-container.olm-dark .olm-topbar{ border-bottom-color: rgba(255,255,255,0.06); }
 
-        .olm-header{ display:flex; align-items:center; gap:10px; }
+        .olm-header{ display:flex; align-items:center; gap:10px; cursor: grab; user-select:none; }
+        .olm-header:active{ cursor: grabbing; }
         .olm-brand{ display:flex; align-items:center; gap:10px; }
         .olm-logo{
           width:28px; height:28px; border-radius:6px; overflow:hidden; flex:0 0 auto;
@@ -520,58 +525,13 @@
           display:flex; gap:8px; align-items:center; flex-wrap:nowrap;
           overflow-x:auto; -webkit-overflow-scrolling: touch; padding-top:2px;
           scrollbar-width: none;
+          cursor: grab;
+          user-select:none;
+          touch-action: pan-x;
         }
+        .olm-controls-row.is-dragging{ cursor: grabbing; }
         .olm-controls-row::-webkit-scrollbar{ height:0; }
         .olm-controls-row .olm-btn{ flex:0 0 auto; min-width:max-content; }
-        #olm-answers-container .controls-slider{
-          width:100%;
-          height:6px;
-          border-radius:999px;
-          background:linear-gradient(90deg,rgba(15,23,42,0.15),rgba(15,23,42,0.05));
-          appearance:none;
-          border:none;
-          outline:none;
-          cursor:pointer;
-          order:-1;
-          margin-bottom:4px;
-          box-shadow:inset 0 1px 2px rgba(15,23,42,0.2);
-        }
-        #olm-answers-container .controls-slider:focus-visible{
-          box-shadow:0 0 0 2px rgba(59,130,246,0.35), inset 0 1px 2px rgba(15,23,42,0.2);
-        }
-        #olm-answers-container .controls-slider::-webkit-slider-runnable-track{
-          height:6px; border-radius:999px; background:transparent;
-        }
-        #olm-answers-container .controls-slider::-webkit-slider-thumb{
-          appearance:none;
-          width:18px; height:18px; border-radius:50%;
-          background:radial-gradient(circle at 30% 30%, #fafcff, #dbeafe);
-          border:1px solid rgba(37,99,235,0.6);
-          box-shadow:0 4px 10px rgba(15,23,42,0.25);
-          margin-top:-6px;
-        }
-        #olm-answers-container .controls-slider::-moz-range-track{
-          height:6px; border-radius:999px; background:transparent;
-        }
-        #olm-answers-container .controls-slider::-moz-range-thumb{
-          width:18px; height:18px; border-radius:50%;
-          border:1px solid rgba(37,99,235,0.6);
-          background:radial-gradient(circle at 30% 30%, #fafcff, #dbeafe);
-          box-shadow:0 4px 10px rgba(15,23,42,0.25);
-        }
-        #olm-answers-container.olm-dark .controls-slider{
-          background:linear-gradient(90deg,rgba(255,255,255,0.18),rgba(255,255,255,0.08));
-          box-shadow:inset 0 1px 2px rgba(0,0,0,0.35);
-        }
-        #olm-answers-container.olm-dark .controls-slider:focus-visible{
-          box-shadow:0 0 0 2px rgba(14,165,233,0.35), inset 0 1px 2px rgba(0,0,0,0.35);
-        }
-        #olm-answers-container.olm-dark .controls-slider::-webkit-slider-thumb,
-        #olm-answers-container.olm-dark .controls-slider::-moz-range-thumb{
-          border:1px solid rgba(125,211,252,0.8);
-          background:radial-gradient(circle at 30% 30%, #f0f9ff, #0f172a);
-          box-shadow:0 4px 12px rgba(8,145,178,0.45);
-        }
 
         /* Nút riêng namespace #olm-answers-container để không ảnh hưởng web */
         #olm-answers-container .olm-btn{
@@ -601,20 +561,18 @@
         }
         #olm-answers-container.olm-dark .olm-btn.is-ghost{ color: var(--text-main); }
         #olm-answers-container .olm-btn.glow-toggle{
-          background:#fff;
-          color:#0f172a;
-          border:1px solid rgba(15,23,42,0.12);
-          box-shadow:0 1px 2px rgba(15,23,42,0.08);
+          background:transparent;
+          color:var(--text-main);
+          border:1px solid rgba(15,23,42,0.2);
+          box-shadow:none;
         }
         #olm-answers-container .olm-btn.glow-toggle:hover,
         #olm-answers-container .olm-btn.glow-toggle:focus-visible{
           box-shadow:0 0 0 1px rgba(37,99,235,0.35);
         }
         #olm-answers-container.olm-dark .olm-btn.glow-toggle{
-          background:transparent;
-          color:var(--text-main);
           border:1px solid rgba(148,163,184,0.45);
-          box-shadow:0 0 0 1px rgba(15,23,42,0.6);
+          box-shadow:none;
         }
         #olm-answers-container .olm-btn.glow-toggle.is-active{
           border:1px solid transparent;
@@ -623,7 +581,7 @@
             linear-gradient(130deg,#2563eb,#06b6d4,#a855f7,#f97316,#facc15,#2563eb) border-box;
           background-size:100% 100%, 280% 280%;
           background-position:0 0, 0% 50%;
-          color:#0f172a;
+          color:var(--text-main);
           box-shadow:0 0 20px rgba(37,99,235,0.35);
           animation:glowSweep 3s linear infinite;
         }
@@ -637,7 +595,7 @@
         }
         #olm-answers-container.olm-dark .olm-btn.glow-toggle.is-active{
           background:
-            linear-gradient(rgba(8,11,20,0.9),rgba(8,11,20,0.9)) padding-box,
+            linear-gradient(rgba(15,23,42,0.25),rgba(15,23,42,0.25)) padding-box,
             linear-gradient(130deg,#38bdf8,#a855f7,#f97316,#facc15,#38bdf8) border-box;
           color:#f8fafc;
           box-shadow:0 0 24px rgba(14,165,233,0.5);
@@ -654,6 +612,17 @@
         #olm-answers-container.olm-dark .search-wrap{ border-bottom-color: rgba(255,255,255,0.06); }
         .search-input{ flex:1; padding:8px 10px; border-radius:10px; border:1px solid rgba(0,0,0,0.06); outline:none; background: rgba(255,255,255,0.85); font-size:13px; color:#111827; }
         #olm-answers-container.olm-dark .search-input{ background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); color: var(--text-main); }
+        .search-clear-btn{
+          width:28px; height:28px; border-radius:999px; border:1px solid rgba(15,23,42,0.15);
+          background:#fff; color:#0f172a; font-weight:700;
+          display:flex; align-items:center; justify-content:center;
+          cursor:pointer; transition: background .2s, color .2s, opacity .2s;
+          opacity:0; pointer-events:none;
+        }
+        .search-clear-btn.is-visible{ opacity:1; pointer-events:auto; }
+        #olm-answers-container.olm-dark .search-clear-btn{
+          background:rgba(15,23,42,0.35); color:#e5e7eb; border-color: rgba(148,163,184,0.35);
+        }
         .meta{ font-size:12px; color: var(--muted); min-width:74px; text-align:right; }
 
         #olm-answers-content{ padding:10px; overflow-y:auto; -webkit-overflow-scrolling: touch; flex:1; display:flex; flex-direction:column; gap:10px; }
@@ -735,7 +704,6 @@
       // Topbar
       const topbar = document.createElement("div");
       topbar.className = "olm-topbar";
-      topbar.addEventListener("pointerdown", this.onPointerDownDrag);
 
       // Header
       const header = document.createElement("div");
@@ -769,10 +737,13 @@
 
       brand.append(logo, titleLine);
       header.append(brand);
+      header.addEventListener("pointerdown", this.onPointerDownDrag);
 
       // Controls
       const controlsRow = document.createElement("div");
       controlsRow.className = "olm-controls-row";
+      controlsRow.addEventListener("pointerdown", this.onControlsPointerDown);
+      controlsRow.addEventListener("click", this.onControlsClickCapture, true);
       const controlsWrap = document.createElement("div");
       controlsWrap.className = "olm-controls-wrap";
 
@@ -798,40 +769,27 @@
       collapseBtn.addEventListener("click", () => this.toggleVisibility());
 
       const exportTxtBtn = document.createElement("button");
-      exportTxtBtn.id = "export-btn"; exportTxtBtn.className = "olm-btn";
+      exportTxtBtn.id = "export-btn"; exportTxtBtn.className = "olm-btn is-ghost";
       exportTxtBtn.textContent = "TXT";
       exportTxtBtn.addEventListener("click", () => this.exportToTxt());
 
       const exportPdfBtn = document.createElement("button");
-      exportPdfBtn.id = "export-pdf-btn"; exportPdfBtn.className = "olm-btn";
+      exportPdfBtn.id = "export-pdf-btn"; exportPdfBtn.className = "olm-btn is-ghost";
       exportPdfBtn.textContent = "PDF";
       exportPdfBtn.addEventListener("click", () => this.exportToPDF());
 
       const exportWordBtn = document.createElement("button");
-      exportWordBtn.id = "export-word-btn"; exportWordBtn.className = "olm-btn";
+      exportWordBtn.id = "export-word-btn"; exportWordBtn.className = "olm-btn is-ghost";
       exportWordBtn.textContent = "WORD";
       exportWordBtn.addEventListener("click", (event) => this.downloadWordFile(event));
 
       const exportWordV2Btn = document.createElement("button");
-      exportWordV2Btn.id = "export-word-v2-btn"; exportWordV2Btn.className = "olm-btn";
+      exportWordV2Btn.id = "export-word-v2-btn"; exportWordV2Btn.className = "olm-btn is-ghost";
       exportWordV2Btn.textContent = "WORD V2";
       exportWordV2Btn.addEventListener("click", (event) => this.exportWordV2(event));
 
       controlsRow.append(darkBtn, collapseBtn, stealthBtn, autoSearchBtn, exportTxtBtn, exportPdfBtn, exportWordBtn, exportWordV2Btn);
-      const controlsSlider = document.createElement("input");
-      controlsSlider.type = "range";
-      controlsSlider.min = "0";
-      controlsSlider.max = "100";
-      controlsSlider.value = "0";
-      controlsSlider.className = "controls-slider";
-      controlsSlider.title = "Keo de xem them nut";
-      controlsSlider.setAttribute("aria-label", "Keo de xem them nut");
-      controlsSlider.hidden = true;
-      controlsSlider.addEventListener("pointerdown", (evt) => evt.stopPropagation());
-      controlsSlider.addEventListener("keydown", (evt) => evt.stopPropagation());
-      controlsSlider.addEventListener("input", this.onControlsSliderInput);
-      controlsRow.addEventListener("scroll", this.syncControlsSlider, { passive: true });
-      controlsWrap.append(controlsSlider, controlsRow);
+      controlsWrap.append(controlsRow);
       topbar.append(header, controlsWrap);
 
       // Search
@@ -839,9 +797,24 @@
       const searchInput = document.createElement("input");
       searchInput.className = "search-input";
       searchInput.placeholder = "Tìm theo từ khóa";
-      searchInput.addEventListener("input", (e) => this.filterDebounced(e.target.value));
+      searchInput.addEventListener("input", (e) => {
+        this.filterDebounced(e.target.value);
+        this.updateSearchClearState();
+      });
+      const clearSearchBtn = document.createElement("button");
+      clearSearchBtn.type = "button";
+      clearSearchBtn.className = "search-clear-btn";
+      clearSearchBtn.setAttribute("aria-label", "Xóa tìm kiếm");
+      clearSearchBtn.textContent = "×";
+      clearSearchBtn.addEventListener("click", () => {
+        if (!this.searchInput) return;
+        if (!this.searchInput.value) return;
+        this.searchInput.value = "";
+        this.filterDebounced("");
+        this.updateSearchClearState();
+      });
       const meta = document.createElement("div"); meta.className = "meta"; meta.id = "meta-info"; meta.textContent = "0 câu";
-      searchWrap.append(searchInput, meta);
+      searchWrap.append(searchInput, clearSearchBtn, meta);
 
       // Content
       this.contentArea = document.createElement("div"); this.contentArea.id = "olm-answers-content";
@@ -870,8 +843,8 @@
       this.stealthBtn = stealthBtn;
       this.autoSearchBtn = autoSearchBtn;
       this.controlsRow = controlsRow;
-      this.controlsSlider = controlsSlider;
-      this.updateControlsSliderState();
+      this.searchClearBtn = clearSearchBtn;
+      this.updateSearchClearState();
 
       // Floating toggle (draggable + icon img)
       const tbtn = document.createElement("div");
@@ -905,7 +878,6 @@
     onWindowResize() {
       this.ensureContainerInViewport();
       this.boundToggleInside();
-      this.updateControlsSliderState();
     }
 
     handleSelectionChange() {
@@ -921,41 +893,57 @@
       this.lastSelectionText = text;
       this.searchInput.value = text;
       this.filterDebounced(text);
+      this.updateSearchClearState();
     }
 
-    onControlsSliderInput(event) {
+    updateSearchClearState() {
+      if (!this.searchClearBtn || !this.searchInput) return;
+      const hasText = !!this.searchInput.value;
+      this.searchClearBtn.classList.toggle("is-visible", hasText);
+      this.searchClearBtn.disabled = !hasText;
+    }
+
+    onControlsPointerDown(e) {
       if (!this.controlsRow) return;
-      const maxScroll = this.controlsRow.scrollWidth - this.controlsRow.clientWidth;
-      if (maxScroll <= 0) return;
-      const slider = event.currentTarget;
-      const value = Number(slider?.value ?? 0);
-      this.controlsRow.scrollLeft = Math.max(0, Math.min(maxScroll, (value / 100) * maxScroll));
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      this.controlsScroll.dragging = true;
+      this.controlsScroll.startX = e.clientX;
+      this.controlsScroll.scrollLeft = this.controlsRow.scrollLeft;
+      this.controlsScroll.moved = false;
+      this.controlsRow.classList.add("is-dragging");
+      window.addEventListener("pointermove", this.onControlsPointerMove, { passive: false });
+      window.addEventListener("pointerup", this.onControlsPointerUp);
     }
 
-    syncControlsSlider() {
-      if (!this.controlsRow || !this.controlsSlider || this.controlsSlider.hidden) return;
-      const maxScroll = this.controlsRow.scrollWidth - this.controlsRow.clientWidth;
-      if (maxScroll <= 0) {
-        if (this.controlsSlider.value !== "0") this.controlsSlider.value = "0";
-        return;
-      }
-      const ratio = this.controlsRow.scrollLeft / maxScroll;
-      const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
-      const next = String(pct);
-      if (this.controlsSlider.value !== next) this.controlsSlider.value = next;
+    onControlsPointerMove(e) {
+      if (!this.controlsScroll.dragging) return;
+      const dx = e.clientX - this.controlsScroll.startX;
+      if (!this.controlsScroll.moved && Math.abs(dx) > 3) this.controlsScroll.moved = true;
+      if (!this.controlsScroll.moved) return;
+      e.preventDefault();
+      this.controlsRow.scrollLeft = this.controlsScroll.scrollLeft - dx;
     }
 
-    updateControlsSliderState() {
-      if (!this.controlsRow || !this.controlsSlider) return;
-      const maxScroll = this.controlsRow.scrollWidth - this.controlsRow.clientWidth;
-      const needsSlider = maxScroll > 4;
-      this.controlsSlider.hidden = !needsSlider;
-      if (!needsSlider) {
-        this.controlsSlider.value = "0";
-        this.controlsRow.scrollLeft = 0;
-        return;
+    onControlsPointerUp(e) {
+      if (!this.controlsScroll.dragging) return;
+      this.controlsScroll.dragging = false;
+      window.removeEventListener("pointermove", this.onControlsPointerMove, { passive: false });
+      window.removeEventListener("pointerup", this.onControlsPointerUp);
+      this.controlsRow.classList.remove("is-dragging");
+      const wasMoved = this.controlsScroll.moved;
+      this.controlsScroll.moved = false;
+      this.controlsScroll.startX = 0;
+      this.controlsScroll.scrollLeft = this.controlsRow?.scrollLeft ?? 0;
+      if (wasMoved) {
+        this.controlsDragPreventClick = true;
+        setTimeout(() => { this.controlsDragPreventClick = false; }, 60);
       }
-      this.syncControlsSlider();
+    }
+
+    onControlsClickCapture(e) {
+      if (!this.controlsDragPreventClick) return;
+      e.stopPropagation();
+      e.preventDefault();
     }
 
     /* ===== Drag & resize panel ===== */
@@ -1020,7 +1008,6 @@
       newH = Math.max(minH, Math.min(maxH, newH));
       this.container.style.width  = newW + 'px';
       this.container.style.height = newH + 'px';
-      this.updateControlsSliderState();
     }
     onPointerUpResize(){
       if (!this.resizeState) return;
@@ -1030,7 +1017,6 @@
       const rect = this.container.getBoundingClientRect();
       this.size = { w: Math.round(rect.width), h: Math.round(rect.height) };
       try { localStorage.setItem(LS_SIZE, JSON.stringify(this.size)); } catch {}
-      this.updateControlsSliderState();
       this.resizeState = null;
     }
 
@@ -1503,7 +1489,6 @@
       this.dark = !this.dark;
       this.container.classList.toggle("olm-dark", this.dark);
       try { localStorage.setItem(LS_DARK, this.dark ? "1" : "0"); } catch {}
-      this.updateControlsSliderState();
     }
 
     toggleStealthMode() {
@@ -1523,7 +1508,6 @@
       }
       if (!this.autoSearchEnabled) this.lastSelectionText = "";
       try { localStorage.setItem(LS_AUTO_SEARCH, this.autoSearchEnabled ? "1" : "0"); } catch {}
-      this.updateControlsSliderState();
     }
 
     applyStealthMode(force) {
@@ -1535,7 +1519,6 @@
         this.stealthBtn.setAttribute("aria-pressed", this.stealthMode ? "true" : "false");
       }
       try { localStorage.setItem(LS_STEALTH, this.stealthMode ? "1" : "0"); } catch {}
-      this.updateControlsSliderState();
     }
 
     applyPosOnly() {
